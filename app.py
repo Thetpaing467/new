@@ -98,7 +98,7 @@ LANG_CONF = {
                 name="Japanese")
         ),
         "font_keys": ("notosanscjk", "notosansjp", "notosansjapanese", "takao", "ipag",
-                      "vl-gothic", "msgothic"),
+                      "vl-gothic", "msgothic", "cjk"),
         "clean": r"[^　-〿぀-ゟ゠-ヿ一-鿿＀-￯0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
@@ -287,11 +287,15 @@ def _globs(base):
 
 def find_font(lang="my", explicit=""):
     """Order: --font path -> RECAP_FONT env -> repo fonts/ -> system fonts."""
-    for cand in (explicit, os.environ.get("RECAP_FONT", "")):
-        if cand and os.path.exists(cand):
-            return cand
-
     conf = LANG_CONF[lang]
+
+    # --font ကို ဘာသာစကားအားလုံးအတွက် သုံးမယ်၊ RECAP_FONT (env) ကို မြန်မာအတွက်ပဲ သုံးမယ်
+    # (မြန်မာ font နဲ့ ဂျပန်/ဂျာမန်ရေးရင် □□□ ပေါ်လို့)
+    if explicit and os.path.exists(explicit):
+        return explicit
+    env_font = os.environ.get("RECAP_FONT", "")
+    if conf["is_mm"] and env_font and os.path.exists(env_font):
+        return env_font
     repo = _globs(REPO_ROOT) + _globs(os.getcwd())
 
     if conf["is_mm"]:
@@ -1844,9 +1848,9 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
             sub = gr.Checkbox(True, label="စာတန်း")
             neon = gr.Checkbox(True, label="Neon")
             flip = gr.Checkbox(True, label="Mirror")
-    sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
-    sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
-    zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
+        sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
+        sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
+        zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
     pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon]
     for trig in (url.submit, b_fetch.click, upload.upload):
