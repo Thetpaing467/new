@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # ======================================================================
 # config
@@ -51,7 +51,7 @@ LANG_CONF = {
                 name="Burmese")
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
-        "clean": r"[^က-႟ꩠ-ꩿꧠ-꧿\s0-9.,!?\"'%\-]",
+        "clean": r"[^\u1000-\u109f\uaa60-\uaa7f\ua9e0-\ua9ff\s0-9.,!?\"'%\-]",
         "is_mm": True,
     },
     "de": {
@@ -99,7 +99,7 @@ LANG_CONF = {
         ),
         "font_keys": ("notosanscjk", "notosansjp", "notosansjapanese", "takao", "ipag",
                       "vl-gothic", "msgothic", "cjk"),
-        "clean": r"[^　-〿぀-ゟ゠-ヿ一-鿿＀-￯0-9\s.,!?\"'%\-]",
+        "clean": r"[^\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff\uff00-\uffef0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
 }
@@ -147,7 +147,7 @@ class Settings:
     # Neon
     neon: bool = True
     neon_th: int = 3
-    neon_speed: float = 0.4
+    neon_speed: float = 0.15      # laps per second (0.15 -> ~6.7s per lap)
 
     def to_dict(self):
         return asdict(self)
@@ -499,7 +499,7 @@ class Neon:
     IDLE = 0.14
     NBINS = 2048
 
-    def __init__(self, W, H, th=3, speed=0.4, tail=0.5):
+    def __init__(self, W, H, th=3, speed=0.15, tail=0.5):
         self.W, self.H, self.speed, self.tail = W, H, speed, tail
         th = max(2, min(th, min(W, H) // 4))
         self.P = 2 * (W + H)
@@ -1443,7 +1443,8 @@ def add_style_args(p):
     g.add_argument("--font", default=SUP, help="font file path")
     g.add_argument("--no-neon", dest="neon", action="store_false", default=SUP)
     g.add_argument("--neon-th", type=int, default=SUP)
-    g.add_argument("--neon-speed", type=float, default=SUP)
+    g.add_argument("--neon-speed", type=float, default=SUP,
+                   help="neon laps per second (default 0.15, lower = slower)")
 
 
 def add_whisper_args(p):
@@ -1768,6 +1769,7 @@ def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, 
         s.lang, s.height, s.zoom = code, int(height), float(zoom)
         s.crop, s.flip, s.sub, s.neon = bool(crop), bool(flip), bool(sub), bool(neon)
         s.sub_size, s.sub_pos = float(sub_size), int(sub_pos)
+        s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
         font = find_font(code, s.font) if s.sub else None
         out = os.path.join(pdir, "preview.png")
         make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
@@ -1826,6 +1828,7 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
         s.height, s.fps, s.preset = int(height), int(fps), preset
         s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
         s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
+        s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
         prog = Progress(0.0, 1.0, parent=_cb(progress))
         res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None,
                          os.environ.get("HF_TOKEN") or None, prog)
