@@ -1705,12 +1705,17 @@ def _ensure_video(url, upload, height, cb):
 
 
 # ---------------------------------------------------------------- fetch + preview
-def fetch(url, upload, height):
-    """Generator: ခလုတ်နှိပ်တာနဲ့ ချက်ချင်း status ပြပြီး % ကို ဆက်ပြမယ်။"""
+FETCH = {}   # job id -> state (background download jobs)
+
+
+def start_fetch(url, upload, height):
+    """ခလုတ်နှိပ်တာနဲ့ ချက်ချင်း return လုပ်ပြီး download ကို နောက်ကွယ်မှာ စတင်မယ်။"""
     if not _source(url, upload):
         raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
-
-    st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None, "done": False}
+    jid = uuid.uuid4().hex[:8]
+    st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None,
+          "done": False, "t0": time.time()}
+    FETCH[jid] = st
 
     def cb(f, label=None):
         st["f"] = max(0.0, min(float(f), 1.0))
@@ -1725,25 +1730,30 @@ def fetch(url, upload, height):
         finally:
             st["done"] = True
 
-    t0 = time.time()
     threading.Thread(target=work, daemon=True).start()
-    yield gr.skip(), "⏳ စတင်နေတယ်..."
+    return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
-    while not st["done"]:
-        time.sleep(0.5)
-        pct = int(st["f"] * 100)
+
+def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon):
+    """Timer က ၁ စက္ကန့်တစ်ခါ ခေါ်မယ် — % ပြ၊ ပြီးရင် Preview ထုတ်ပြီး timer ရပ်။"""
+    st = FETCH.get(jid) if jid else None
+    if st is None:
+        return gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
+    elapsed = time.time() - st["t0"]
+    if not st["done"]:
         if st["f"] >= 1.0:
             msg = "🔄 MP4 ပြင်ဆင်နေတယ် (ဖိုင်ကြီးရင် ခဏကြာမယ်)"
         else:
-            msg = f"⬇️ {st['label']} {pct}%"
-        yield gr.skip(), f"{msg} · {time.time() - t0:.0f}s"
-
+            msg = f"⬇️ {st['label']} {int(st['f'] * 100)}%"
+        return gr.skip(), f"{msg} · {elapsed:.0f}s", gr.skip(), gr.skip()
+    FETCH.pop(jid, None)
     if st["err"] is not None:
-        ex = st["err"]
-        raise gr.Error(str(ex)[:600])
+        return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.Timer(active=False)
     pdir, proj = st["res"]
     mb = os.path.getsize(proj.video) / 1e6
-    yield pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · Preview ထုတ်နေတယ်... ပြီးရင် 1️⃣ နှိပ်ပါ"
+    img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, False)
+    return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ",
+            img, gr.Timer(active=False))
 
 
 def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, strict):
@@ -1837,7 +1847,7 @@ def reset_all(pdir):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 4`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -1881,8 +1891,14 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
         zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
     pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon]
+    fetch_job = gr.State("")
+    fetch_timer = gr.Timer(1.0, active=False)
     for trig in (url.submit, b_fetch.click, upload.upload):
-        trig(fetch, [url, upload, height], [pdir_state, status_fetch]).then(preview_auto, pv_in, pv_img)
+        trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
+    fetch_timer.tick(poll_fetch,
+                     [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon],
+                     [pdir_state, status_fetch, pv_img, fetch_timer],
+                     show_progress="hidden")
     for c in (sub_size, sub_pos, zoom):
         c.release(preview_auto, pv_in, pv_img)
     for c in (sub, neon, flip, lang):
