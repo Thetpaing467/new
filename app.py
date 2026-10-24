@@ -749,13 +749,14 @@ def merge_segments(raw):
 
 
 def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=True,
-                     max_min=15, progress=None):
-    """Returns (units, vdur, info_text). Each unit = {start, end, src, my}."""
+                     max_min=0, progress=None):
+    """Returns (units, vdur, info_text). Each unit = {start, end, src, my}.
+    max_min = 0 (or None) means unlimited length."""
     progress = progress or (lambda f, l=None: None)
     vdur = probe_duration(video)
-    if vdur > max_min * 60:
+    if max_min and vdur > max_min * 60:
         raise RuntimeError(f"Video က {vdur / 60:.1f} မိနစ်ရှိတယ်။ --max-min {max_min} ထက် ကျော်နေတယ် "
-                           "(--max-min တိုးပါ)")
+                           "(--max-min တိုးပါ၊ 0 = ကန့်သတ်မရှိ)")
 
     progress(0.0, "Audio ထုတ်နေတယ်")
     wav = os.path.join(workdir, "audio16k.wav")
@@ -1200,7 +1201,7 @@ def init_project(path, source, height=720, cookies_file=None, progress=None):
 
 
 # ---------------------------------------------------------------- transcribe
-def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=15, lang="my",
+def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, lang="my",
                    progress=None):
     t0 = time.time()
     units, vdur, info = transcribe_video(proj.video, proj.path, model, src_lang, fast,
@@ -1446,7 +1447,8 @@ def add_whisper_args(p):
     g.add_argument("--model", choices=["tiny", "base", "small"], default="base")
     g.add_argument("--src-lang", default="auto", help="auto | en | zh | ko | ja | hi | th | vi | id")
     g.add_argument("--no-batch", action="store_true", help="whisper batch mode ပိတ်")
-    g.add_argument("--max-min", type=int, default=15, help="video အရှည် ကန့်သတ် (မိနစ်)")
+    g.add_argument("--max-min", type=int, default=0,
+                   help="video အရှည် ကန့်သတ် (မိနစ်) · 0 = ကန့်သတ်မရှိ")
 
 
 def settings_for(proj, args):
@@ -1806,6 +1808,16 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     gr.Markdown("# 🎙️ Recap → Multi-Language\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း + Neon")
     pdir_state = gr.State("")
 
+    # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
+    height = gr.State(720)
+    fps = gr.State(24)
+    preset = gr.State("ultrafast")
+    max_speed = gr.State(1.25)
+    crop = gr.State(True)
+    model = gr.State("base")
+    src_lang = gr.State("auto")
+    max_min = gr.State(0)       # 0 = unlimited
+
     with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
         lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
         engine = gr.Radio(["Edge TTS", "VoxCPM"], value="Edge TTS", label="TTS engine")
@@ -1817,20 +1829,6 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
         lang.change(lambda l: gr.update(choices=voices_for(LANGS[l]), value=voices_for(LANGS[l])[0]),
                     lang, voice)
 
-    with gr.Accordion("⚙️ Video / Whisper", open=False):
-        with gr.Row():
-            height = gr.Dropdown([360, 480, 720, 1080], value=720, label="Output height")
-            fps = gr.Dropdown([20, 24, 25, 30], value=24, label="FPS")
-            preset = gr.Dropdown(["ultrafast", "superfast", "veryfast"], value="ultrafast", label="Render speed")
-        with gr.Row():
-            max_speed = gr.Slider(1.0, 2.0, value=1.25, step=0.05, label="ရုပ် အမြန်ဆုံး ဆ")
-            crop = gr.Checkbox(True, label="အနက်ဘောင် ဖြတ်")
-        with gr.Row():
-            model = gr.Dropdown(["tiny", "base", "small"], value="base", label="Whisper model")
-            src_lang = gr.Dropdown(["auto", "en", "zh", "ko", "ja", "hi", "th", "vi", "id"],
-                                   value="auto", label="မူရင်းဘာသာ")
-            max_min = gr.Slider(1, 120, value=15, step=1, label="အရှည်ကန့်သတ် (မိနစ်)")
-
     gr.Markdown("### 📥 Video")
     url = gr.Textbox(label="Video link (mp4 / Google Drive / Dropbox / YouTube / FB / TikTok ...) — paste ပြီး Enter",
                      placeholder="https://...")
@@ -1841,10 +1839,11 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
 
     gr.Markdown("### 🎨 စာတန်း / Neon (Preview ကြည့်ပြီး ချိန်ပါ)")
     pv_img = gr.Image(label="Preview", type="filepath", interactive=False)
-    with gr.Row():
-        sub = gr.Checkbox(True, label="စာတန်း")
-        neon = gr.Checkbox(True, label="Neon")
-        flip = gr.Checkbox(True, label="Mirror")
+    with gr.Accordion("🎛️ စာတန်း / Neon / Mirror", open=False):
+        with gr.Row():
+            sub = gr.Checkbox(True, label="စာတန်း")
+            neon = gr.Checkbox(True, label="Neon")
+            flip = gr.Checkbox(True, label="Mirror")
     sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
     sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
     zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
@@ -1854,14 +1853,18 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
         trig(fetch, [url, upload, height], [pdir_state, status_fetch]).then(preview_auto, pv_in, pv_img)
     for c in (sub_size, sub_pos, zoom):
         c.release(preview_auto, pv_in, pv_img)
-    for c in (sub, neon, flip, crop, height, lang):
+    for c in (sub, neon, flip, lang):
         c.change(preview_auto, pv_in, pv_img)
 
     gr.Markdown("### 1️⃣ စာသားထုတ်")
     b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
     status1 = gr.Markdown()
-    prompt = gr.Textbox(label="📋 Gemini Prompt (Copy ယူပြီး Gemini မှာ paste)", lines=8,
-                        interactive=False)
+    with gr.Accordion("📋 Gemini Prompt", open=False):
+        prompt = gr.Textbox(label="Gemini Prompt (Copy ယူပြီး Gemini မှာ paste)", lines=8,
+                            interactive=False, show_copy_button=True)
+        b_copy = gr.Button("📋 Copy Prompt")
+        b_copy.click(None, prompt, None,
+                     js="(t) => { navigator.clipboard.writeText(t); }")
 
     gr.Markdown("### 2️⃣ ဘာသာပြန်ရလဒ်")
     translated = gr.Textbox(label="Gemini ရလဒ် paste ([0] ... [1] ...)", lines=8)
