@@ -33,6 +33,38 @@ def _cb(progress):
     return lambda frac, label=None: progress(frac, desc=label or "")
 
 
+# ---------------------------------------------------------------- preview
+def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, strict):
+    if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
+        if strict:
+            raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ (video ဆွဲပြီးမှ preview ကြည့်လို့ရမယ်)")
+        return gr.update()
+    code = LANGS[lang_name]
+    try:
+        proj = recap.Project.load(pdir)
+        s = proj.settings
+        s.lang, s.height, s.zoom = code, int(height), float(zoom)
+        s.crop, s.flip, s.sub, s.neon = bool(crop), bool(flip), bool(sub), bool(neon)
+        s.sub_size, s.sub_pos = float(sub_size), int(sub_pos)
+        font = recap.find_font(code, s.font) if s.sub else None
+        out = os.path.join(pdir, "preview.png")
+        recap.make_preview_frame(proj.video, out, s, recap.LANG_CONF[code]["sample"], font,
+                                 recap.LANG_CONF[code]["is_mm"])
+        return out
+    except Exception as ex:
+        if strict:
+            raise gr.Error(str(ex)[:400])
+        return gr.update()
+
+
+def preview_btn(*a):
+    return _preview(*a, True)
+
+
+def preview_auto(*a):
+    return _preview(*a, False)
+
+
 # ---------------------------------------------------------------- step 1
 def step1(url, upload, lang_name, model, src_lang, max_min, height, progress=gr.Progress()):
     source = _path(upload) or (url or "").strip()
@@ -89,7 +121,7 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
 def reset(pdir):
     if pdir and os.path.isdir(pdir) and pdir.startswith(BASE):
         shutil.rmtree(pdir, ignore_errors=True)
-    return "", "", "", "", None, None, "🗑️ ရှင်းပြီး"
+    return "", "", "", "", None, None, None, "🗑️ ရှင်းပြီး"
 
 
 # ---------------------------------------------------------------- UI
@@ -108,22 +140,14 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
         lang.change(lambda l: gr.update(choices=voices_for(LANGS[l]), value=voices_for(LANGS[l])[0]),
                     lang, voice)
 
-    with gr.Accordion("⚙️ Video / စာတန်း / Neon", open=False):
+    with gr.Accordion("⚙️ Video / Whisper", open=False):
         with gr.Row():
             height = gr.Dropdown([360, 480, 720, 1080], value=720, label="Output height")
             fps = gr.Dropdown([20, 24, 25, 30], value=24, label="FPS")
             preset = gr.Dropdown(["ultrafast", "superfast", "veryfast"], value="ultrafast", label="Render speed")
         with gr.Row():
             max_speed = gr.Slider(1.0, 2.0, value=1.25, step=0.05, label="ရုပ် အမြန်ဆုံး ဆ")
-            zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
-        with gr.Row():
             crop = gr.Checkbox(True, label="အနက်ဘောင် ဖြတ်")
-            flip = gr.Checkbox(True, label="Mirror")
-            sub = gr.Checkbox(True, label="စာတန်း")
-            neon = gr.Checkbox(True, label="Neon")
-        with gr.Row():
-            sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
-            sub_pos = gr.Slider(0, 100, value=90, step=1, label="နေရာ (0=အပေါ် 100=အောက်)")
         with gr.Row():
             model = gr.Dropdown(["tiny", "base", "small"], value="base", label="Whisper model")
             src_lang = gr.Dropdown(["auto", "en", "zh", "ko", "ja", "hi", "th", "vi", "id"],
@@ -140,6 +164,24 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     prompt = gr.Textbox(label="📋 Gemini Prompt (Copy ယူပြီး Gemini မှာ paste)", lines=8,
                         interactive=False)
 
+    gr.Markdown("### 🎨 စာတန်း / Neon (Preview ကြည့်ပြီး ချိန်ပါ)")
+    pv_img = gr.Image(label="Preview", type="filepath", interactive=False)
+    with gr.Row():
+        sub = gr.Checkbox(True, label="စာတန်း")
+        neon = gr.Checkbox(True, label="Neon")
+        flip = gr.Checkbox(True, label="Mirror")
+    sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
+    sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
+    zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
+    b_pv = gr.Button("🔍 Preview ပြန်ကြည့်")
+
+    pv_in = [pdir, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon]
+    b_pv.click(preview_btn, pv_in, pv_img)
+    for c in (sub_size, sub_pos, zoom):
+        c.release(preview_auto, pv_in, pv_img)
+    for c in (sub, neon, flip, crop, height, lang):
+        c.change(preview_auto, pv_in, pv_img)
+
     gr.Markdown("### 2️⃣ ဘာသာပြန်ရလဒ်")
     translated = gr.Textbox(label="Gemini ရလဒ် paste ([0] ... [1] ...)", lines=8)
     b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
@@ -148,11 +190,12 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     dl = gr.File(label="⬇️ Download MP4")
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-    b1.click(step1, [url, upload, lang, model, src_lang, max_min, height], [pdir, status, prompt])
+    b1.click(step1, [url, upload, lang, model, src_lang, max_min, height],
+             [pdir, status, prompt]).then(preview_auto, pv_in, pv_img)
     b2.click(step2, [pdir, translated, lang, engine, voice, rate, workers, vox_ref, height, fps,
                      preset, max_speed, crop, flip, zoom, sub, sub_size, sub_pos, neon],
              [video, dl, status2])
-    b3.click(reset, pdir, [pdir, status, prompt, translated, video, dl, status2])
+    b3.click(reset, pdir, [pdir, status, prompt, translated, pv_img, video, dl, status2])
 
 if __name__ == "__main__":
     demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
