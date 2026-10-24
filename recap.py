@@ -1075,17 +1075,24 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
 
 
 def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
-    """Render one frame (subtitle + neon + zoom/flip) to a PNG for quick style checks."""
+    """One frame (subtitle + neon + zoom/flip) -> PNG. Only a 3s clip is processed (fast)."""
+    clip = out_png + "_clip.mp4"
     tmp = out_png + "_pv.mp4"
-    W, H = prepare_video(src, tmp, s.height, s.crop)
-    cap = cv2.VideoCapture(tmp)
-    cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
-    ok, fr = cap.read()
-    if not ok:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    try:
+        for ss in (["-ss", "1"], []):
+            subprocess.run(["ffmpeg", "-y", *ss, "-i", src, "-t", "3", "-an", "-c:v", "libx264",
+                            "-preset", "ultrafast", "-crf", "28", clip],
+                           capture_output=True, text=True)
+            if os.path.exists(clip) and os.path.getsize(clip) > 1000:
+                break
+        W, H = prepare_video(clip, tmp, s.height, s.crop)
+        cap = cv2.VideoCapture(tmp)
         ok, fr = cap.read()
-    cap.release()
-    os.remove(tmp)
+        cap.release()
+    finally:
+        for f in (clip, tmp):
+            if os.path.exists(f):
+                os.remove(f)
     if not ok:
         raise RuntimeError("preview frame မရပါ")
     fr = zoom_flip(cv2.resize(fr, (W, H)), s.zoom, s.flip)
