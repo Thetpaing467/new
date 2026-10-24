@@ -302,6 +302,8 @@ def find_font(lang="my", explicit=""):
         for f in repo:
             if any(k in os.path.basename(f).lower() for k in conf["font_keys"]):
                 return f
+        if repo:                      # your own uploaded font (any file name) wins over system fonts
+            return sorted(repo)[0]
     else:
         for key in conf["font_keys"]:
             for f in _prefer_regular(repo):
@@ -1141,8 +1143,10 @@ class Project:
     # -- io --
     @classmethod
     def create(cls, path):
+        os.makedirs(os.path.abspath(path), exist_ok=True)
+        if os.path.exists(os.path.join(os.path.abspath(path), cls.FILE)):
+            return cls.load(path)   # keep existing units / settings
         p = cls(path)
-        os.makedirs(p.path, exist_ok=True)
         p.save()
         return p
 
