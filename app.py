@@ -1705,17 +1705,45 @@ def _ensure_video(url, upload, height, cb):
 
 
 # ---------------------------------------------------------------- fetch + preview
-def fetch(url, upload, height, progress=gr.Progress()):
-    cb = _cb(progress)
-    try:
-        cb(0.0, "Video ယူနေတယ်...")
-        pdir, proj = _ensure_video(url, upload, height, cb)
-    except gr.Error:
-        raise
-    except Exception as ex:
+def fetch(url, upload, height):
+    """Generator: ခလုတ်နှိပ်တာနဲ့ ချက်ချင်း status ပြပြီး % ကို ဆက်ပြမယ်။"""
+    if not _source(url, upload):
+        raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+
+    st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None, "done": False}
+
+    def cb(f, label=None):
+        st["f"] = max(0.0, min(float(f), 1.0))
+        if label:
+            st["label"] = label
+
+    def work():
+        try:
+            st["res"] = _ensure_video(url, upload, height, cb)
+        except BaseException as ex:
+            st["err"] = ex
+        finally:
+            st["done"] = True
+
+    t0 = time.time()
+    threading.Thread(target=work, daemon=True).start()
+    yield gr.skip(), "⏳ စတင်နေတယ်..."
+
+    while not st["done"]:
+        time.sleep(0.5)
+        pct = int(st["f"] * 100)
+        if st["f"] >= 1.0:
+            msg = "🔄 MP4 ပြင်ဆင်နေတယ် (ဖိုင်ကြီးရင် ခဏကြာမယ်)"
+        else:
+            msg = f"⬇️ {st['label']} {pct}%"
+        yield gr.skip(), f"{msg} · {time.time() - t0:.0f}s"
+
+    if st["err"] is not None:
+        ex = st["err"]
         raise gr.Error(str(ex)[:600])
+    pdir, proj = st["res"]
     mb = os.path.getsize(proj.video) / 1e6
-    return pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ"
+    yield pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · Preview ထုတ်နေတယ်... ပြီးရင် 1️⃣ နှိပ်ပါ"
 
 
 def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, strict):
