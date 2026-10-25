@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # ======================================================================
 # config
@@ -1079,10 +1079,15 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     return out
 
 
-def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
-    """One frame (subtitle + neon + zoom/flip) -> PNG. Only a 3s clip is processed (fast)."""
-    clip = out_png + "_clip.mp4"
-    tmp = out_png + "_pv.mp4"
+def _preview_base_frame(src, base_png, height, crop):
+    """Prepared (cropped+scaled) first frame. Cached on disk so slider changes are instant."""
+    if os.path.exists(base_png):
+        fr = cv2.imread(base_png)
+        if fr is not None:
+            return fr
+    clip = base_png + "_clip.mp4"
+    tmp = base_png + "_pv.mp4"
+    fr, ok = None, False
     try:
         for ss in (["-ss", "1"], []):
             subprocess.run(["ffmpeg", "-y", *ss, "-i", src, "-t", "3", "-an", "-c:v", "libx264",
@@ -1090,20 +1095,33 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
                            capture_output=True, text=True)
             if os.path.exists(clip) and os.path.getsize(clip) > 1000:
                 break
-        W, H = prepare_video(clip, tmp, s.height, s.crop)
+        W, H = prepare_video(clip, tmp, height, crop)
         cap = cv2.VideoCapture(tmp)
         ok, fr = cap.read()
         cap.release()
+        if ok:
+            fr = cv2.resize(fr, (W, H))
     finally:
         for f in (clip, tmp):
             if os.path.exists(f):
                 os.remove(f)
     if not ok:
         raise RuntimeError("preview frame မရပါ")
-    fr = zoom_flip(cv2.resize(fr, (W, H)), s.zoom, s.flip)
+    cv2.imwrite(base_png, fr)
+    return fr
+
+
+def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
+    """One frame (subtitle + neon + zoom/flip) -> PNG.
+    The expensive ffmpeg step runs only once per (video, height, crop); sliders reuse it."""
+    base_png = os.path.join(os.path.dirname(os.path.abspath(out_png)),
+                            f"pv_base_{os.path.getsize(src)}_{int(s.height)}_{int(bool(s.crop))}.png")
+    base = _preview_base_frame(src, base_png, s.height, s.crop)
+    H, W = base.shape[:2]
+    fr = zoom_flip(base.copy(), s.zoom, s.flip)
     if s.neon:
         Neon(W, H, s.neon_th, s.neon_speed).apply(fr, 1.0)
-    if font_path:
+    if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
         if ov:
@@ -1761,7 +1779,7 @@ def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, 
     if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
         if strict:
             raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
-        return gr.update()
+        return gr.skip()
     code = LANGS[lang_name]
     try:
         proj = Project.load(pdir)
@@ -1771,14 +1789,22 @@ def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, 
         s.sub_size, s.sub_pos = float(sub_size), int(sub_pos)
         s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
         font = find_font(code, s.font) if s.sub else None
-        out = os.path.join(pdir, "preview.png")
+
+        # ဖိုင်နာမည် အသစ်ပေးမှ browser/gradio cache မကပ်ဘဲ preview ပြောင်းမယ်
+        for old in glob.glob(os.path.join(pdir, "preview_*.png")):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        out = os.path.join(pdir, f"preview_{int(time.time() * 1000)}.png")
         make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
                            LANG_CONF[code]["is_mm"])
         return out
     except Exception as ex:
+        log(f"preview error: {ex}")
         if strict:
             raise gr.Error(str(ex)[:400])
-        return gr.update()
+        return gr.skip()
 
 
 def preview_btn(*a):
@@ -1850,7 +1876,7 @@ def reset_all(pdir):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 4`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 5`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -1902,10 +1928,12 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
                      [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon],
                      [pdir_state, status_fetch, pv_img, fetch_timer],
                      show_progress="hidden")
-    for c in (sub_size, sub_pos, zoom):
-        c.release(preview_auto, pv_in, pv_img)
-    for c in (sub, neon, flip, lang):
-        c.change(preview_auto, pv_in, pv_img)
+
+    # Slider: .release က phone (touch) မှာ မခံစားရလို့ .change သုံးတယ်၊
+    # always_last = ဆွဲနေတုန်း တန်းစီမနေဘဲ နောက်ဆုံးတန်ဖိုးပဲ ယူမယ်
+    for c in (sub_size, sub_pos, zoom, sub, neon, flip, lang):
+        c.change(preview_auto, pv_in, pv_img,
+                 trigger_mode="always_last", show_progress="hidden", queue=True)
 
     gr.Markdown("### 1️⃣ စာသားထုတ်")
     b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
