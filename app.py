@@ -1,8 +1,16 @@
-"""Recap CLI (single file): Whisper -> Gemini (manual) -> TTS -> smart-sync render.
+"""Recap CLI + Web UI (single file).
 
-Usage: python recap.py run <video|url> -d work/ep1 --lang my
+Two modes:
+  recap   : Whisper -> Gemini (manual translate) -> TTS -> smart-sync render
+  narrato : Gemini vision watches the video -> AI writes narration (NarratoAI style)
+            -> TTS -> (smart-sync | ffmpeg fast) render, optional BGM / original audio
+
+Usage:
+  python recap.py                                  (Web UI)
+  python recap.py run <video|url> -d work/ep1 --lang my
+  python recap.py run <video|url> -d work/ep1 --mode narrato --gemini-key AIza...
 """
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 # ======================================================================
 # config
@@ -50,6 +58,8 @@ LANG_CONF = {
                 script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
                 name="Burmese")
         ),
+        "nr_rule": ("write ONLY in Myanmar (Burmese) Unicode script, natural spoken storyteller "
+                    "style, no English/Chinese letters"),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
         "clean": r"[^\u1000-\u109f\uaa60-\uaa7f\ua9e0-\ua9ff\s0-9.,!?\"'%\-]",
         "is_mm": True,
@@ -71,6 +81,7 @@ LANG_CONF = {
             + _PROMPT_TAIL.format(
                 script="use ONLY German (Latin script), no Chinese letters.", name="German")
         ),
+        "nr_rule": "write ONLY in German (Latin script), natural spoken storyteller style",
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
         "clean": r"[^A-Za-zÄÖÜäöüß0-9\s.,!?\"'%\-]",
         "is_mm": False,
@@ -97,6 +108,8 @@ LANG_CONF = {
                        "letters except kanji.",
                 name="Japanese")
         ),
+        "nr_rule": ("write ONLY in Japanese (Kanji, Hiragana, Katakana), natural spoken "
+                    "storyteller style"),
         "font_keys": ("notosanscjk", "notosansjp", "notosansjapanese", "takao", "ipag",
                       "vl-gothic", "msgothic", "cjk"),
         "clean": r"[^\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff\uff00-\uffef0-9\s.,!?\"'%\-]",
@@ -122,6 +135,8 @@ def resolve_lang(value):
 
 @dataclass
 class Settings:
+    # Mode
+    mode: str = "recap"           # recap | narrato
     # TTS
     lang: str = "my"
     engine: str = "edge"          # edge | vox
@@ -148,6 +163,16 @@ class Settings:
     neon: bool = True
     neon_th: int = 3
     neon_speed: float = 0.15      # laps per second (0.15 -> ~6.7s per lap)
+    # Narrato (AI script) mode
+    gemini_model: str = "gemini-2.5-flash"
+    nr_interval: float = 3.0      # take one frame every N seconds
+    nr_batch: int = 10            # frames per Gemini vision request
+    nr_ost: int = 0               # default OST: 0 = narration only, 2 = narration + original (quiet)
+    nr_orig_vol: float = 0.35     # original audio volume (OST 2)
+    nr_bgm: str = ""              # background music file
+    nr_bgm_vol: float = 0.25
+    nr_fast: bool = False         # ffmpeg fast render (no neon / zoom)
+    nr_min_speed: float = 0.75    # slowest video speed when narration is longer than the scene
 
     def to_dict(self):
         return asdict(self)
@@ -810,6 +835,323 @@ def parse_numbered(text, n):
     return got
 
 # ======================================================================
+# narrato  (NarratoAI style: Gemini vision -> AI narration script)
+# ======================================================================
+"""Video frames -> Gemini vision (scene descriptions) -> Gemini text (narration JSON) -> units."""
+import base64
+import glob
+import json
+import os
+import re
+import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+NARRATION_SYSTEM = (
+    "You are a senior short-video narration director and screenwriter who understands viral "
+    "content and viewer psychology, and who writes sticky, high-retention narration."
+)
+
+VISION_PROMPT = (
+    "You are analysing consecutive frames sampled from a video. "
+    "For each of the {n} frames below, write ONE short factual sentence in English describing "
+    "the people, their action, emotion and the setting. Describe only what is visible; "
+    "do not guess names or plot. Return ONLY a JSON array of exactly {n} strings, "
+    "in the same order as the frames."
+)
+
+# Adapted from NarratoAI  app/services/prompts/documentary/narration_generation.py (v2.0)
+NARRATION_PROMPT = """As a short-video narration director, you must understand the core rules of viral content. Core techniques of hit short-video narration:
+
+<viral_techniques>
+## Golden 3-second rule
+The first 3 seconds decide whether the viewer keeps watching. Hook them immediately.
+
+## 10 hook types
+1. Suspense: "You'll never guess what happens next..."
+2. Twist: "Everyone thought... but the truth is..."
+3. Numbers: "Only 3 steps / 5 minutes / 1 trick..."
+4. Pain point: "Still struggling with...?"
+5. Awe: "Incredible! This is what..."
+6. Question: "Why...? The answer is surprising"
+7. Contrast: "Beginner VS expert, the gap is huge"
+8. Secret: "Only insiders know..."
+9. Empathy: "How many of you are like me..."
+10. Mind-flip: "It turns out we were wrong all along..."
+
+## Core elements of the narration
+- Rhythm: short, punchy sentences that are easy to say aloud
+- Visual: describe concrete actions and details, avoid abstract talk
+- Emotion curve: anticipation, surprise, satisfaction
+- Information density: a new information point every 5-10 seconds
+- Conversational: like talking to a friend, no bookish language
+- Silence: at key visual moments say less and let the picture speak
+
+## Structure
+[Hook] 0-3s -> [Development] 3-30s -> [Climax] 30-45s -> [Ending: reinforce memory / invite interaction] 45-60s
+</viral_techniques>
+
+<video_frame_description>
+${video_frame_description}
+</video_frame_description>
+
+Now, based on <video_frame_description>, write a narration that follows these viral rules.
+Each line of the description has the form "start-end: what is on screen".
+
+<creation_guide>
+Steps: 1) analyse the theme and highlights 2) choose the best hook 3) pick the most attractive detail of each scene 4) design the emotion curve 5) keep narration tightly in sync with the picture.
+</creation_guide>
+
+Output JSON in exactly this format:
+
+<output>
+{
+  "items": [
+    {
+      "_id": 1,
+      "timestamp": "00:00:05,390-00:00:10,430",
+      "picture": "scene description",
+      "narration": "narration text"
+    }
+  ]
+}
+</output>
+
+<restriction>
+1. Output JSON only, no other text.
+2. Write every "narration" in ${language}: ${script_rule}.
+3. Never invent scenes; "picture" may only be taken from <video_frame_description>.
+4. Never invent timestamps. Each item's timestamp must start at the start of one of the given ranges and end at the end of the same or a later range (you may merge 1 to 4 consecutive ranges so each item lasts about 3-12 seconds). Items must be in chronological order, must not overlap, and together should cover the whole video.
+5. The opening must use a hook (golden 3 seconds).
+6. Each item's narration must match its picture precisely and be short enough to be spoken inside its time range.
+7. Keep the story coherent, with rhythm and a sense of narrative.
+8. Keep sentences short and conversational.
+9. At visual climaxes use fewer words and let the picture speak.
+10. Match the style of popular short-video platforms.
+</restriction>"""
+
+
+def fmt_ts(sec):
+    """seconds -> HH:MM:SS,mmm"""
+    ms_total = int(round(max(0.0, float(sec)) * 1000))
+    h, ms_total = divmod(ms_total, 3600000)
+    m, ms_total = divmod(ms_total, 60000)
+    s_, ms_total = divmod(ms_total, 1000)
+    return f"{h:02d}:{m:02d}:{s_:02d},{ms_total:03d}"
+
+
+def ts_to_sec(t):
+    m = re.match(r"\s*(\d+):(\d+):(\d+)(?:[,.](\d+))?", str(t))
+    if not m:
+        raise ValueError(f"bad timestamp: {t}")
+    h, mi, se, frac = m.groups()
+    return int(h) * 3600 + int(mi) * 60 + int(se) + (float("0." + frac) if frac else 0.0)
+
+
+def parse_json_loose(text):
+    t = (text or "").strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t, flags=re.S).strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        m = re.search(r"(\{.*\}|\[.*\])", t, re.S)
+        if m:
+            return json.loads(m.group(1))
+        raise
+
+
+def gemini_generate(api_key, model, parts, system=None, json_out=False,
+                    temperature=0.7, retries=4, timeout=240):
+    """Plain REST call to the Gemini API (no extra package needed)."""
+    import requests
+    body = {"contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"temperature": temperature}}
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    if json_out:
+        body["generationConfig"]["responseMimeType"] = "application/json"
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+    last = ""
+    for attempt in range(retries):
+        try:
+            r = requests.post(GEMINI_URL.format(model=model), json=body,
+                              headers=headers, timeout=timeout)
+            if r.status_code == 200:
+                data = r.json()
+                cands = data.get("candidates") or []
+                if cands:
+                    ps = (cands[0].get("content") or {}).get("parts") or []
+                    text = "".join(p.get("text", "") for p in ps)
+                    if text.strip():
+                        return text
+                    last = "empty text"
+                else:
+                    last = "no candidates: " + str(data.get("promptFeedback") or data)[:200]
+            elif r.status_code in (429, 500, 502, 503, 504):
+                last = f"HTTP {r.status_code}: {r.text[:200]}"
+            else:
+                raise RuntimeError(f"Gemini HTTP {r.status_code}: {r.text[:300]}")
+        except requests.RequestException as ex:
+            last = str(ex)[:200]
+        time.sleep(2 * (attempt + 1) ** 2)
+    raise RuntimeError(f"Gemini မအောင်မြင်ပါ: {last}")
+
+
+def extract_frames(video, workdir, interval):
+    """One JPEG every `interval` seconds -> [(time_sec, path)]"""
+    fdir = os.path.join(workdir, "frames")
+    shutil.rmtree(fdir, ignore_errors=True)
+    os.makedirs(fdir, exist_ok=True)
+    interval = max(1.0, float(interval))
+    sh(["ffmpeg", "-y", "-i", video, "-an", "-vf", f"fps={1.0 / interval:.6f},scale=-2:360",
+        "-q:v", "5", os.path.join(fdir, "f_%05d.jpg")])
+    files = sorted(glob.glob(os.path.join(fdir, "f_*.jpg")))
+    return [(k * interval, f) for k, f in enumerate(files)]
+
+
+def analyze_frames(frames, s, api_key, progress):
+    """Gemini vision, in batches. Returns one English description per frame."""
+    bs = max(1, int(s.nr_batch))
+    batches = [frames[i:i + bs] for i in range(0, len(frames), bs)]
+    out = [None] * len(batches)
+
+    def work(bi):
+        batch = batches[bi]
+        parts = [{"text": VISION_PROMPT.format(n=len(batch))}]
+        for k, (t, path) in enumerate(batch, 1):
+            with open(path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            parts.append({"text": f"Frame {k} (t={fmt_ts(t)}):"})
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
+        txt = gemini_generate(api_key, s.gemini_model, parts, json_out=True, temperature=0.2)
+        try:
+            arr = parse_json_loose(txt)
+            if isinstance(arr, dict):
+                arr = next(iter(arr.values()))
+            arr = [str(x).strip() for x in arr]
+        except Exception:
+            arr = []
+        arr = (arr + [""] * len(batch))[:len(batch)]
+        return bi, arr
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futs = [pool.submit(work, bi) for bi in range(len(batches))]
+        try:
+            for fu in as_completed(futs):
+                bi, arr = fu.result()
+                out[bi] = arr
+                done += 1
+                progress(done / len(batches), f"Gemini က video ကြည့်နေတယ် {done}/{len(batches)}")
+        except BaseException:
+            for f_ in futs:
+                f_.cancel()
+            raise
+    descs = [d for arr in out for d in arr]
+    blank = sum(1 for d in descs if not d)
+    if descs and blank > len(descs) * 0.5:
+        raise RuntimeError("Gemini vision ရလဒ် မမှန်မကန် ဖြစ်နေတယ် (model နာမည် / API key ကို စစ်ပါ)")
+    return [d or "(unclear)" for d in descs]
+
+
+def generate_narration(descs, s, api_key, lang):
+    conf = LANG_CONF[lang]
+    frames_text = "\n".join(f"{fmt_ts(a)}-{fmt_ts(b)}: {d}" for a, b, d in descs)
+    prompt = (NARRATION_PROMPT
+              .replace("${video_frame_description}", frames_text)
+              .replace("${language}", conf["name"])
+              .replace("${script_rule}", conf["nr_rule"]))
+    txt = gemini_generate(api_key, s.gemini_model, [{"text": prompt}],
+                          system=NARRATION_SYSTEM, json_out=True, temperature=0.8)
+    data = parse_json_loose(txt)
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        raise RuntimeError("Gemini က script JSON မပေးပါ")
+    return prompt, items
+
+
+def items_to_units(items, vdur, lang, default_ost):
+    units = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        try:
+            nums = re.findall(r"\d+:\d+:\d+(?:[,.]\d+)?", str(it.get("timestamp", "")))
+            if len(nums) < 2:
+                continue
+            a, b = ts_to_sec(nums[0]), ts_to_sec(nums[1])
+        except Exception:
+            continue
+        a = max(0.0, min(a, vdur))
+        b = max(0.0, min(b, vdur))
+        if b - a < 0.3:
+            continue
+        try:
+            ost = int(it.get("OST", default_ost))
+        except Exception:
+            ost = default_ost
+        if ost not in (0, 1, 2):
+            ost = default_ost
+        narr = clean_text(str(it.get("narration", "")), lang)
+        if ost != 1 and not narr:
+            continue
+        units.append({"start": a, "end": b, "src": str(it.get("picture", "")).strip(),
+                      "my": narr, "ost": ost})
+    units.sort(key=lambda u: u["start"])
+    if not units:
+        raise RuntimeError("Script ထဲက item တွေ သုံးလို့မရပါ (timestamp / narration မမှန်)")
+    return units
+
+
+def numbered_text(units):
+    return "\n".join(f"[{i}] {'-' if u.get('ost') == 1 else u['my']}"
+                     for i, u in enumerate(units))
+
+
+def run_narrato_script(proj, s, api_key, progress=None):
+    """frames -> Gemini vision -> Gemini narration -> proj.units. Returns info text."""
+    progress = progress or (lambda f, l=None: None)
+    api_key = (api_key or os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("Gemini API key လိုတယ် (UI ထဲ ထည့်ပါ / --gemini-key / env GEMINI_API_KEY)")
+    t0 = time.time()
+    lang = s.lang
+    vdur = probe_duration(proj.video)
+
+    progress(0.0, "Frame ထုတ်နေတယ်")
+    frames = extract_frames(proj.video, proj.path, s.nr_interval)
+    if not frames:
+        raise RuntimeError("Frame မရပါ")
+    if len(frames) > 800:
+        raise RuntimeError(f"Frame {len(frames)} ခု များလွန်းတယ် — frame အကွာအဝေး (--interval) တိုးပါ")
+
+    texts = analyze_frames(frames, s, api_key,
+                           lambda f, l=None: progress(0.05 + 0.65 * f, l))
+    descs = [(t, min(t + s.nr_interval, vdur), texts[k]) for k, (t, _) in enumerate(frames)]
+
+    progress(0.72, "Narration script ရေးနေတယ်")
+    prompt, items = generate_narration(descs, s, api_key, lang)
+    units = items_to_units(items, vdur, lang, s.nr_ost)
+
+    with open(proj.prompt_file, "w", encoding="utf-8") as f:
+        f.write(prompt)
+    with open(proj.translated_file, "w", encoding="utf-8") as f:
+        f.write(numbered_text(units))
+
+    proj.data["units"] = units
+    proj.data["vdur"] = vdur
+    proj.data["built"] = "narrato"
+    proj.data["timings"]["narrato script"] = time.time() - t0
+    info = f"Narrato script · frame {len(frames)} ခု → အပိုင်း {len(units)} ခု"
+    proj.data["info"] = info
+    proj.update_settings(s)
+    proj.save()
+    progress(1.0, "ပြီးပြီ")
+    return info
+
+# ======================================================================
 # tts
 # ======================================================================
 """Text-to-speech engines: Edge TTS and VoxCPM (Hugging Face Spaces)."""
@@ -901,10 +1243,12 @@ class VoxEngine:
 # ======================================================================
 # render
 # ======================================================================
-"""Smart-sync video render: speed-adjusted frames + subtitles + neon border -> ffmpeg."""
+"""Smart-sync video render: speed-adjusted frames + subtitles + neon border -> ffmpeg.
+Also: render_fast() = pure-ffmpeg render used by Narrato mode's "fast" option."""
 import os
 import queue
 import re
+import shutil
 import subprocess
 import threading
 
@@ -1079,6 +1423,91 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     return out
 
 
+# ---------------------------------------------------------------- fast (pure ffmpeg)
+def _concat_paths(paths, out):
+    """ffmpeg concat demuxer, stream copy (all inputs must share the same format)."""
+    lst = out + ".txt"
+    with open(lst, "w", encoding="utf-8") as f:
+        for p in paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    sh(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out])
+    return out
+
+
+def _probe_wh(path):
+    o = sh(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+            "stream=width,height", "-of", "csv=p=0", path]).strip()
+    w, h = o.split(",")[:2]
+    return int(w), int(h)
+
+
+def write_srt(subs, path):
+    with open(path, "w", encoding="utf-8") as f:
+        for i, (a, b, t) in enumerate(subs, 1):
+            f.write(f"{i}\n{fmt_ts(a)} --> {fmt_ts(b)}\n{t}\n\n")
+
+
+def _qf(value):
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def render_fast(src, audio, out, plan, total, s, subs, font_path, progress=None):
+    """NarratoAI-style ffmpeg render: cut each segment -> concat -> add audio + subtitles.
+    Much faster than the Python frame loop, but no neon border / zoom."""
+    tmpd = out + "_segs"
+    shutil.rmtree(tmpd, ignore_errors=True)
+    os.makedirs(tmpd, exist_ok=True)
+    H = int(s.height) // 2 * 2
+    n = len(plan)
+    cuts = []
+    try:
+        for k, (cs, d, s0, spd) in enumerate(plan):
+            o = os.path.join(tmpd, f"c{k:04d}.mp4")
+            vf = [f"setpts=PTS/{spd:.5f}", f"scale=-2:{H}", f"fps={int(s.fps)}"]
+            if s.flip:
+                vf.insert(0, "hflip")
+            sh(["ffmpeg", "-y", "-ss", f"{s0:.3f}", "-t", f"{d * spd:.3f}", "-i", src,
+                "-an", "-vf", ",".join(vf),
+                "-c:v", "libx264", "-preset", s.preset, "-crf", "26", "-pix_fmt", "yuv420p",
+                "-t", f"{d:.3f}", o])
+            cuts.append(o)
+            if progress:
+                progress((k + 1) / n * 0.8, "Video ဖြတ်နေတယ်")
+        merged = os.path.join(tmpd, "merged.mp4")
+        _concat_paths(cuts, merged)
+
+        cmd = ["ffmpeg", "-y", "-i", merged, "-i", audio, "-map", "0:v", "-map", "1:a:0"]
+        if subs and font_path:
+            srt = os.path.join(tmpd, "sub.srt")
+            write_srt(subs, srt)
+            W, Hh = _probe_wh(merged)
+            try:
+                fam = ImageFont.truetype(font_path, 12).getname()[0]
+            except Exception:
+                fam = "Arial"
+            fs = max(16, int(W * s.sub_size / 100))
+            margin = int(Hh * (100 - int(s.sub_pos)) / 100 * 0.9) + 10
+            back_alpha = max(0, min(255, 255 - int(s.sub_alpha)))
+            style = (f"Fontname={fam},Fontsize={fs},PrimaryColour=&H00FFFFFF,"
+                     f"OutlineColour=&H00000000,BackColour=&H{back_alpha:02X}000000,"
+                     f"BorderStyle=3,Outline=4,Shadow=0,Alignment=2,MarginV={margin}")
+            vf = (f"subtitles=filename={_qf(srt)}:original_size={W}x{Hh}:"
+                  f"fontsdir={_qf(os.path.dirname(os.path.abspath(font_path)))}:"
+                  f"force_style={_qf(style)}")
+            cmd += ["-vf", vf, "-c:v", "libx264", "-preset", s.preset, "-crf", "26",
+                    "-pix_fmt", "yuv420p"]
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+                "-t", f"{total:.3f}", out]
+        sh(cmd)
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+    if progress:
+        progress(1.0, "Video render")
+    return out
+
+
 def _preview_base_frame(src, base_png, height, crop):
     """Prepared (cropped+scaled) first frame. Cached on disk so slider changes are instant."""
     if os.path.exists(base_png):
@@ -1143,7 +1572,8 @@ class Project:
 
     def __init__(self, path):
         self.path = os.path.abspath(path)
-        self.data = {"source": "", "vdur": 0.0, "units": [], "timings": {}, "settings": {}}
+        self.data = {"source": "", "vdur": 0.0, "units": [], "timings": {}, "settings": {},
+                     "built": ""}
 
     # -- paths --
     @property
@@ -1205,6 +1635,7 @@ class Project:
 """High-level steps: init / transcribe / apply translation / dub + render."""
 import hashlib
 import os
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1230,6 +1661,7 @@ def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, la
                                          max_min, progress)
     proj.data["units"] = units
     proj.data["vdur"] = vdur
+    proj.data["built"] = "recap"
     proj.data["timings"]["transcribe"] = time.time() - t0
     proj.data["info"] = info
     s = proj.settings
@@ -1252,13 +1684,14 @@ def apply_translation(proj, text, lang):
     got = parse_numbered(text, len(units))
     for i, t in got.items():
         units[i]["my"] = clean_text(t, lang)
-    missing = [i for i in range(len(units)) if not units[i]["my"]]
+    skip = {i for i, u in enumerate(units) if u.get("ost") == 1}   # original-audio segments
+    missing = [i for i in range(len(units)) if not units[i]["my"] and i not in skip]
     proj.save()
     return len(got), missing
 
 
 # ---------------------------------------------------------------- dub + render
-def _synthesize(proj, my_list, s, progress, proxy, hf_token):
+def _synthesize(proj, my_list, s, progress, proxy, hf_token, skip=()):
     wd = proj.path
     n = len(my_list)
     is_vox = s.engine == "vox"
@@ -1270,6 +1703,8 @@ def _synthesize(proj, my_list, s, progress, proxy, hf_token):
     sig_base = f"{s.engine}|{voice}|{s.rate_str()}|{ref_sig}"
 
     def do_line(i):
+        if i in skip:
+            return i, 0.0
         wav = os.path.join(wd, f"a{i:04d}.wav")
         keyf = os.path.join(wd, f"a{i:04d}.key")
         key = hashlib.md5(f"{sig_base}|{my_list[i]}".encode()).hexdigest()
@@ -1365,8 +1800,145 @@ def _build_subs(my_list, durs, lang):
     return subs
 
 
+# ---------------------------------------------------------------- narrato helpers
+def has_audio_stream(path):
+    try:
+        return sh(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                   "stream=codec_type", "-of", "csv=p=0", path]).strip() == "audio"
+    except Exception:
+        return False
+
+
+def _orig_seg(src, st, d, out, has_a):
+    """OST=1 : original audio only (exactly d seconds, padded with silence if short)."""
+    if has_a:
+        sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-t", f"{d:.3f}", "-i", src, "-vn",
+            "-af", "apad", "-ar", "44100", "-ac", "1", "-t", f"{d:.3f}", out])
+    else:
+        sh(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-t", f"{d:.3f}", out])
+
+
+def _mix_ost2(src, st, d, tts_wav, out, orig_vol):
+    """OST=2 : narration + original audio (quiet) for exactly d seconds."""
+    fc = (f"[0:a]volume={orig_vol:.3f},apad[o];[1:a]apad[v];"
+          f"[o][v]amix=inputs=2:duration=longest:dropout_transition=0,volume=2,"
+          f"atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a]")
+    try:
+        sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-t", f"{d:.3f}", "-i", src, "-i", tts_wav,
+            "-filter_complex", fc, "-map", "[a]", "-ar", "44100", "-ac", "1",
+            "-t", f"{d:.3f}", out])
+    except Exception:
+        shutil.copy(tts_wav, out)
+
+
+def _mix_bgm(voice_wav, bgm, vol, out):
+    T = wav_dur(voice_wav)
+    fs = max(0.0, T - 3.0)
+    fc = (f"[1:a]volume={vol:.3f},atrim=0:{T:.3f},afade=t=out:st={fs:.3f}:d=3,"
+          f"asetpts=PTS-STARTPTS[b];"
+          f"[0:a][b]amix=inputs=2:duration=first:dropout_transition=0,volume=2[o]")
+    sh(["ffmpeg", "-y", "-i", voice_wav, "-stream_loop", "-1", "-i", bgm,
+        "-filter_complex", fc, "-map", "[o]", "-ar", "44100", "-ac", "1",
+        "-t", f"{T:.3f}", out])
+    return out
+
+
+def _render_narrato(proj, s, proxy, hf_token, progress):
+    lang = s.lang
+    conf = LANG_CONF[lang]
+    wd, src = proj.path, proj.video
+    units = proj.units
+    if not units or proj.data.get("built") != "narrato":
+        raise RuntimeError("Narrato script မရှိသေးပါ — 1️⃣ (script ထုတ်) ကို အရင်လုပ်ပါ")
+    n = len(units)
+    osts = [int(u.get("ost", s.nr_ost)) for u in units]
+    my_list = [clean_text(u["my"], lang) for u in units]
+    skip = {i for i, o in enumerate(osts) if o == 1}
+    empty = [i for i, t in enumerate(my_list) if i not in skip and not t.strip()]
+    if empty:
+        raise RuntimeError(f"စာသား မဖြည့်ရသေးတဲ့ စာကြောင်း: {empty[:20]}")
+    if s.engine == "vox" and lang != "my":
+        log("⚠️ VoxCPM က မြန်မာအတွက်သာ သင့်တယ်။ ဂျာမနီ/ဂျပန်အတွက် --engine edge သုံးပါ။")
+
+    font = ""
+    if s.sub:
+        font = find_font(lang, s.font)
+        if not font:
+            log(f"⚠️ {conf['label']} font မတွေ့ပါ — စာတန်းမပါဘဲ render လုပ်မယ်")
+
+    T = {}
+    t_all = time.time()
+
+    t_a = time.time()
+    durs = _synthesize(proj, my_list, s, progress.sub(0.0, 0.25), proxy, hf_token, skip=skip)
+    T["TTS"] = time.time() - t_a
+
+    # ---- per-segment audio + plan -------------------------------------------
+    t_a = time.time()
+    vdur = float(proj.data["vdur"])
+    has_a = has_audio_stream(src) if any(o in (1, 2) for o in osts) else False
+    seg_paths, plan, cum = [], [], 0.0
+    for i, u in enumerate(units):
+        ost = osts[i]
+        st = min(float(u["start"]), max(vdur - 0.5, 0.0))
+        w = max(float(u["end"]) - float(u["start"]), 0.3)
+        tts = os.path.join(wd, f"a{i:04d}.wav")
+        if ost == 1:
+            seg = os.path.join(wd, f"ns{i:04d}.wav")
+            _orig_seg(src, st, w, seg, has_a)
+            speed = 1.0
+        elif ost == 2:
+            seg = os.path.join(wd, f"ns{i:04d}.wav")
+            d = max(durs[i], 0.05)
+            if has_a:
+                _mix_ost2(src, st, d, tts, seg, s.nr_orig_vol)
+            else:
+                shutil.copy(tts, seg)
+            speed = 1.0
+        else:
+            seg = tts
+            d = max(durs[i], 0.05)
+            speed = max(s.nr_min_speed, min(w / d, s.max_speed))
+        dur = wav_dur(seg)
+        seg_paths.append(seg)
+        plan.append((cum, dur, st, speed))
+        cum += dur
+    total = cum
+
+    allwav = os.path.join(wd, "all.wav")
+    _concat_paths(seg_paths, allwav)
+    audio = allwav
+    if s.nr_bgm and os.path.exists(s.nr_bgm) and s.nr_bgm_vol > 0:
+        audio = _mix_bgm(allwav, s.nr_bgm, s.nr_bgm_vol, os.path.join(wd, "all_bgm.wav"))
+    T["audio"] = time.time() - t_a
+    progress.sub(0.25, 0.3)(1.0, "အသံ ပြင်ဆင်ပြီး")
+
+    sub_texts = ["" if i in skip else my_list[i] for i in range(n)]
+    subs = []
+    if s.sub and font:
+        subs = [x for x in _build_subs(sub_texts, [p[1] for p in plan], lang) if x[2].strip()]
+
+    t_a = time.time()
+    if s.nr_fast:
+        render_fast(src, audio, proj.final, plan, total, s, subs, font,
+                    progress=progress.sub(0.3, 1.0))
+    else:
+        render_final(src, audio, proj.final, plan, total, s, subs, font,
+                     is_mm=conf["is_mm"], progress=progress.sub(0.3, 1.0))
+    T["render"] = time.time() - t_a
+    T["total (stage 2)"] = time.time() - t_all
+
+    proj.data["timings"].update({f"stage2 {k}": v for k, v in T.items()})
+    proj.update_settings(s)
+    proj.save()
+    return {"final": proj.final, "new_dur": total, "old_dur": vdur, "timings": T}
+
+
 def run_render(proj, s, proxy=None, hf_token=None, progress=None):
     progress = progress or Progress()
+    if s.mode == "narrato":
+        return _render_narrato(proj, s, proxy, hf_token, progress)
     lang = s.lang
     conf = LANG_CONF[lang]
     units = proj.units
@@ -1421,10 +1993,11 @@ def run_render(proj, s, proxy=None, hf_token=None, progress=None):
 
   recap init <video|url> -d work/ep1        download / copy video into a project
   recap transcribe work/ep1 --lang my       Whisper -> units + prompt.txt
-  recap apply work/ep1 [translated.txt]     fill translations from Gemini's reply
-  recap render work/ep1                     TTS + smart-sync render -> final.mp4
+                                            (--mode narrato : Gemini vision + AI-written script)
+  recap apply work/ep1 [translated.txt]     fill translations / edit narration from a file
+  recap render work/ep1                     TTS + render -> final.mp4
   recap preview work/ep1                    one PNG frame to check subtitle/neon style
-  recap run <video|url> -d work/ep1         whole flow, pauses once for the translation
+  recap run <video|url> -d work/ep1         whole flow (recap mode pauses once for the translation)
 """
 import argparse
 import os
@@ -1465,6 +2038,24 @@ def add_style_args(p):
                    help="neon laps per second (default 0.15, lower = slower)")
 
 
+def add_narrato_args(p):
+    g = p.add_argument_group("narrato (AI-written script mode)")
+    g.add_argument("--mode", choices=["recap", "narrato"], default=SUP,
+                   help="recap = Whisper + Gemini ကိုယ်တိုင်ပြန် · narrato = AI က video ကြည့်ပြီး script ရေး")
+    g.add_argument("--gemini-key", default=None, help="Gemini API key (သို့) env GEMINI_API_KEY")
+    g.add_argument("--gemini-model", default=SUP, help="default gemini-2.5-flash")
+    g.add_argument("--interval", dest="nr_interval", type=float, default=SUP,
+                   help="frame တစ်ခု ယူတဲ့ စက္ကန့် (default 3)")
+    g.add_argument("--nr-batch", type=int, default=SUP, help="Gemini request တစ်ခုမှာ frame အရေအတွက်")
+    g.add_argument("--nr-ost", type=int, choices=[0, 2], default=SUP,
+                   help="0 = AI အသံပဲ · 2 = မူရင်းအသံ အသာထား")
+    g.add_argument("--orig-vol", dest="nr_orig_vol", type=float, default=SUP)
+    g.add_argument("--bgm", dest="nr_bgm", default=SUP, help="background music file")
+    g.add_argument("--bgm-vol", dest="nr_bgm_vol", type=float, default=SUP)
+    g.add_argument("--fast", dest="nr_fast", action="store_true", default=SUP,
+                   help="ffmpeg fast render (neon/zoom မပါ)")
+
+
 def add_whisper_args(p):
     g = p.add_argument_group("whisper")
     g.add_argument("--model", choices=["tiny", "base", "small"], default="base")
@@ -1477,13 +2068,17 @@ def add_whisper_args(p):
 def settings_for(proj, args):
     s = proj.settings
     for k, v in vars(args).items():
-        if hasattr(s, k):
+        if v is not None and hasattr(s, k):
             setattr(s, k, v)
     s.rate = max(-50, min(100, s.rate))
     s.max_speed = max(1.0, min(2.0, s.max_speed))
     s.zoom = max(1.0, min(1.25, s.zoom))
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
+    s.nr_interval = max(1.0, min(20.0, float(s.nr_interval)))
+    s.nr_batch = max(1, min(30, int(s.nr_batch)))
+    s.nr_orig_vol = max(0.0, min(1.0, float(s.nr_orig_vol)))
+    s.nr_bgm_vol = max(0.0, min(1.0, float(s.nr_bgm_vol)))
     if s.voice and s.engine == "edge":
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -1507,8 +2102,18 @@ def cmd_init(args):
 
 def cmd_transcribe(args, proj=None):
     proj = proj or Project.load(args.dir)
-    lang = getattr(args, "lang", None) or proj.settings.lang
+    s = settings_for(proj, args)
+    proj.update_settings(s)
+    proj.save()
+    lang = s.lang
     prog = Progress()
+    if s.mode == "narrato":
+        key = getattr(args, "gemini_key", None) or os.environ.get("GEMINI_API_KEY")
+        info = run_narrato_script(proj, s, key, prog)
+        prog.done()
+        print(f"✅ {info}\n   Script (ပြင်လို့ရ): {proj.translated_file}")
+        print("   → ပြင်ချင်ရင် translated.txt ကို ပြင်ပြီး `recap apply` လုပ်၊ ပြီးရင် `recap render`")
+        return proj
     info = run_transcribe(proj, args.model, args.src_lang, not args.no_batch, args.max_min,
                           lang, prog)
     prog.done()
@@ -1563,7 +2168,8 @@ def cmd_render(args, proj=None):
     mb = os.path.getsize(out) / 1e6
     print(f"\n✅ ပြီးပြီ: {out}  ({mb:.1f} MB)")
     print(f"   {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s)")
-    t = {**{"transcribe": proj.data["timings"].get("transcribe", 0)}, **res["timings"]}
+    t = {**{k: proj.data["timings"].get(k, 0) for k in ("transcribe", "narrato script")},
+         **res["timings"]}
     print("⏱️\n" + timing_table({k: v for k, v in t.items() if v}))
 
 
@@ -1585,6 +2191,19 @@ def cmd_run(args):
     proj.update_settings(s)
     proj.save()
     args.lang = s.lang
+
+    # ---- Narrato mode: AI writes the script, no manual translation step ----
+    if s.mode == "narrato":
+        if proj.units and proj.data.get("built") == "narrato":
+            log("• script ရှိပြီးသား၊ Gemini ကျော်မယ်")
+        else:
+            cmd_transcribe(args, proj)
+        tfile = args.translated
+        if tfile and os.path.exists(tfile):
+            cmd_apply(args, proj, tfile)
+        cmd_render(args, proj)
+        return
+
     if not proj.units:
         cmd_transcribe(args, proj)
     else:
@@ -1608,7 +2227,8 @@ def cmd_run(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="recap.py",
-        description="Recap video dubber: Whisper -> Gemini (manual) -> TTS -> smart-sync render")
+        description="Recap video dubber: Whisper -> Gemini (manual) -> TTS -> smart-sync render "
+                    "(or Narrato mode: Gemini vision writes the narration)")
     p.add_argument("--version", action="version", version=f"recap-cli {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1619,10 +2239,11 @@ def build_parser():
     a.add_argument("--cookies", help="yt-dlp cookies.txt (သို့) env YT_COOKIES")
     a.set_defaults(fn=cmd_init)
 
-    a = sub.add_parser("transcribe", help="Whisper စာသားထုတ် + prompt.txt")
+    a = sub.add_parser("transcribe", help="Whisper စာသားထုတ် + prompt.txt  (--mode narrato = AI script)")
     a.add_argument("dir")
     a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de | ja")
     add_whisper_args(a)
+    add_narrato_args(a)
     a.set_defaults(fn=cmd_transcribe)
 
     a = sub.add_parser("prompt", help="Gemini prompt ပြန်ထုတ် (ဘာသာစကားပြောင်းချင်ရင်)")
@@ -1641,6 +2262,7 @@ def build_parser():
     a.add_argument("dir")
     a.add_argument("-o", "--output", help="final mp4 ကို ဒီနေရာ copy")
     add_style_args(a)
+    add_narrato_args(a)
     a.set_defaults(fn=cmd_render)
 
     a = sub.add_parser("preview", help="စာတန်း/neon style စစ်ဖို့ ပုံတစ်ပုံ")
@@ -1649,7 +2271,7 @@ def build_parser():
     add_style_args(a)
     a.set_defaults(fn=cmd_preview)
 
-    a = sub.add_parser("run", help="အစအဆုံး (translation မှာ တစ်ခါ ရပ်မယ်)")
+    a = sub.add_parser("run", help="အစအဆုံး (recap mode မှာ translation မှာ တစ်ခါ ရပ်မယ်)")
     a.add_argument("source")
     a.add_argument("-d", "--dir", help="project folder (default work/recap)")
     a.add_argument("--translated", help="Gemini ရလဒ် ဖိုင် (ရှိပြီးသားဆိုရင် မရပ်ဘူး)")
@@ -1657,6 +2279,7 @@ def build_parser():
     a.add_argument("--cookies")
     add_whisper_args(a)
     add_style_args(a)
+    add_narrato_args(a)
     a.set_defaults(fn=cmd_run)
     return p
 
@@ -1688,6 +2311,11 @@ os.makedirs(BASE, exist_ok=True)
 PORT = int(os.environ.get("PORT", "7860"))
 
 LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "ဂျပန်": "ja"}
+MODES = {
+    "Recap (Whisper + Gemini ကိုယ်တိုင်ပြန်)": "recap",
+    "Narrato (AI က video ကြည့်ပြီး script ရေး)": "narrato",
+}
+NR_OST = {"0 · AI အသံပဲ": 0, "2 · မူရင်းအသံ အသာထား": 2}
 
 
 def voices_for(code):
@@ -1815,27 +2443,45 @@ def preview_auto(*a):
     return _preview(*a, False)
 
 
-# ---------------------------------------------------------------- step 1 (whisper)
-def step1(url, upload, lang_name, model, src_lang, max_min, height, progress=gr.Progress()):
+# ---------------------------------------------------------------- step 1 (whisper | narrato script)
+def step1(url, upload, lang_name, mode_name, model, src_lang, max_min, height,
+          gkey, gmodel, nr_interval, nr_batch, nr_ost_name, progress=gr.Progress()):
     code = LANGS[lang_name]
+    mode = MODES[mode_name]
     cb = _cb(progress)
     try:
         cb(0.0, "Video ယူနေတယ်...")
         pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
         tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
-        info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
+        if mode == "narrato":
+            s = proj.settings
+            s.mode, s.lang = "narrato", code
+            s.gemini_model = (gmodel or "").strip() or s.gemini_model
+            s.nr_interval, s.nr_batch = float(nr_interval), int(nr_batch)
+            s.nr_ost = NR_OST[nr_ost_name]
+            proj.update_settings(s)
+            proj.save()
+            info = run_narrato_script(proj, s, gkey, tr)
+        else:
+            s = proj.settings
+            s.mode = "recap"
+            proj.update_settings(s)
+            proj.save()
+            info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
     except gr.Error:
         raise
     except Exception as ex:
         raise gr.Error(str(ex)[:600])
     prompt_text = open(proj.prompt_file, encoding="utf-8").read()
-    return pdir, f"✅ {info}", prompt_text
+    translated_text = numbered_text(proj.units) if mode == "narrato" else gr.skip()
+    return pdir, f"✅ {info}", prompt_text, translated_text
 
 
 # ---------------------------------------------------------------- step 2 (tts + render)
-def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
+def step2(pdir, translated, lang_name, mode_name, engine, voice, rate, workers, vox_ref,
           height, fps, preset, max_speed, crop, flip, zoom,
-          sub, sub_size, sub_pos, neon, progress=gr.Progress()):
+          sub, sub_size, sub_pos, neon,
+          nr_orig_vol, nr_bgm, nr_bgm_vol, nr_fast, progress=gr.Progress()):
     if not pdir or not os.path.isdir(pdir):
         raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
     code = LANGS[lang_name]
@@ -1847,6 +2493,7 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
         if missing:
             raise RuntimeError(f"ဘာသာပြန် မပြည့်သေးဘူး ({got}/{len(proj.units)}) · မပါတာ: {missing[:15]}")
         s = proj.settings
+        s.mode = MODES[mode_name]
         s.lang, s.engine = code, ("vox" if engine == "VoxCPM" else "edge")
         s.voice = voice if voice in voices_for(code) else ""
         s.rate, s.tts_workers = int(rate), int(workers)
@@ -1855,6 +2502,8 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
         s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
         s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
         s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
+        s.nr_orig_vol, s.nr_bgm = float(nr_orig_vol), _path(nr_bgm)
+        s.nr_bgm_vol, s.nr_fast = float(nr_bgm_vol), bool(nr_fast)
         prog = Progress(0.0, 1.0, parent=_cb(progress))
         res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None,
                          os.environ.get("HF_TOKEN") or None, prog)
@@ -1876,7 +2525,8 @@ def reset_all(pdir):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 5`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 6`\n"
+                "Recap: Whisper → Gemini → TTS → Smart Sync  ·  Narrato: Gemini vision → AI script → TTS → Render")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -1889,6 +2539,8 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     src_lang = gr.State("auto")
     max_min = gr.State(0)       # 0 = unlimited
 
+    mode = gr.Radio(list(MODES), value=list(MODES)[0], label="🎬 Mode")
+
     with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
         lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
         engine = gr.Radio(["Edge TTS", "VoxCPM"], value="Edge TTS", label="TTS engine")
@@ -1899,6 +2551,20 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
         vox_ref = gr.File(label="🎤 VoxCPM reference audio (optional)", type="filepath")
         lang.change(lambda l: gr.update(choices=voices_for(LANGS[l]), value=voices_for(LANGS[l])[0]),
                     lang, voice)
+
+    with gr.Accordion("🤖 Narrato options (Narrato mode မှာပဲ သုံးတယ်)", open=False):
+        gkey = gr.Textbox(label="Gemini API key", type="password",
+                          value=os.environ.get("GEMINI_API_KEY", ""), placeholder="AIza...")
+        gmodel = gr.Textbox(label="Gemini model (error တက်ရင် model နာမည် ပြောင်းစမ်းပါ)",
+                            value=Settings().gemini_model)
+        with gr.Row():
+            nr_interval = gr.Slider(2, 10, value=3, step=1, label="Frame ယူတဲ့ အကွာအဝေး (စက္ကန့်)")
+            nr_batch = gr.Slider(4, 20, value=10, step=1, label="Request တစ်ခုမှာ frame အရေအတွက်")
+        nr_ost = gr.Radio(list(NR_OST), value=list(NR_OST)[0], label="မူရင်းအသံ (OST)")
+        nr_orig_vol = gr.Slider(0.0, 1.0, value=0.35, step=0.05, label="မူရင်းအသံ volume (OST 2)")
+        nr_bgm = gr.File(label="🎵 Background music (optional)", type="filepath")
+        nr_bgm_vol = gr.Slider(0.0, 1.0, value=0.25, step=0.05, label="BGM volume")
+        nr_fast = gr.Checkbox(False, label="⚡ ffmpeg fast render (Neon/Zoom မပါ၊ Mirror + စာတန်းပါ)")
 
     gr.Markdown("### 📥 Video")
     url = gr.Textbox(label="Video link (mp4 / Google Drive / Dropbox / YouTube / FB / TikTok ...) — paste ပြီး Enter",
@@ -1935,31 +2601,37 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
         c.change(preview_auto, pv_in, pv_img,
                  trigger_mode="always_last", show_progress="hidden", queue=True)
 
-    gr.Markdown("### 1️⃣ စာသားထုတ်")
-    b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
+    gr.Markdown("### 1️⃣ စာသားထုတ် / Script ထုတ်")
+    b1 = gr.Button("1️⃣ စတင် (Recap = Whisper · Narrato = Gemini က script ရေး)", variant="primary")
     status1 = gr.Markdown()
     with gr.Accordion("📋 Gemini Prompt", open=False):
-        prompt = gr.Textbox(label="Gemini Prompt (Copy ယူပြီး Gemini မှာ paste)", lines=8,
+        prompt = gr.Textbox(label="Gemini Prompt (Recap mode: Copy ယူပြီး Gemini မှာ paste)", lines=8,
                             interactive=False, show_copy_button=True)
         b_copy = gr.Button("📋 Copy Prompt")
         b_copy.click(None, prompt, None,
                      js="(t) => { navigator.clipboard.writeText(t); }")
 
-    gr.Markdown("### 2️⃣ ဘာသာပြန်ရလဒ်")
-    translated = gr.Textbox(label="Gemini ရလဒ် paste ([0] ... [1] ...)", lines=8)
+    gr.Markdown("### 2️⃣ ဘာသာပြန်ရလဒ် / Narration (Narrato mode မှာ AI ရေးထားတာ ပြင်လို့ရ)")
+    translated = gr.Textbox(label="[0] ... [1] ... (Recap: Gemini ရလဒ် paste · Narrato: auto ဖြည့်ပေးထား)",
+                            lines=8)
     b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
     status2 = gr.Markdown()
     video = gr.Video(label="ရလဒ်")
     dl = gr.File(label="⬇️ Download MP4")
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-    b1.click(step1, [url, upload, lang, model, src_lang, max_min, height],
-             [pdir_state, status1, prompt])
-    b2.click(step2, [pdir_state, translated, lang, engine, voice, rate, workers, vox_ref, height,
-                     fps, preset, max_speed, crop, flip, zoom, sub, sub_size, sub_pos, neon],
+    b1.click(step1, [url, upload, lang, mode, model, src_lang, max_min, height,
+                     gkey, gmodel, nr_interval, nr_batch, nr_ost],
+             [pdir_state, status1, prompt, translated])
+    b2.click(step2, [pdir_state, translated, lang, mode, engine, voice, rate, workers, vox_ref, height,
+                     fps, preset, max_speed, crop, flip, zoom, sub, sub_size, sub_pos, neon,
+                     nr_orig_vol, nr_bgm, nr_bgm_vol, nr_fast],
              [video, dl, status2])
     b3.click(reset_all, pdir_state,
              [pdir_state, status_fetch, status1, prompt, translated, pv_img, video, dl, status2])
 
 if __name__ == "__main__":
-    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
+    if len(sys.argv) > 1:
+        main()          # CLI:  python recap.py run <video> -d work/ep1 ...
+    else:
+        demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
