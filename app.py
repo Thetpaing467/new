@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 # ======================================================================
 # config
@@ -26,9 +26,23 @@ VOX_SPACES = [
 
 VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".flv")
 
+# Human-like narration rules (added to every language prompt).
+# NOTE: the cleaner removes "…" and emoji, so we only ask for the language's own
+# comma / full-stop marks. Edge TTS and VoxCPM take their breathing pauses from those marks.
+_HUMAN = (
+    "VOICE STYLE (very important): the result will be read aloud by a speech engine, so it must "
+    "sound like a real human storyteller talking to a friend, NOT a robot reading text. "
+    "Write the way people actually speak: short natural phrases; put a comma-type mark exactly "
+    "where a speaker would take a small breath; end thoughts with a full stop; vary the rhythm "
+    "(mix short punchy lines with longer flowing ones); never write a long sentence without a "
+    "breathing pause; use everyday spoken wording instead of stiff, literary or textbook wording; "
+    "let emotion match the scene (tension, surprise, sadness, relief). {accent} "
+    "Do NOT use ellipsis (...), emoji, brackets, asterisks or stage directions. "
+)
+
 _PROMPT_TAIL = (
     "Rules: do NOT summarize, shorten or skip; do NOT move content between lines; "
-    "keep character names consistent across all lines; {script} "
+    "keep character names consistent across all lines; {script} " + _HUMAN +
     "Output exactly one line per input line in the format [number] {name} text "
     "-- same numbers, no extra comments.\n\n"
 )
@@ -48,6 +62,10 @@ LANG_CONF = {
             "below into natural spoken Burmese narration (storyteller style). "
             + _PROMPT_TAIL.format(
                 script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
+                accent=("Use spoken Burmese endings (တယ်၊ ပါတယ်၊ တော့၊ ပေါ့၊ လေ၊ ပဲ) instead of literary "
+                        "endings (၏၊ သည်၊ ၍၊ သော်လည်း). Use '၊' for every small breath pause "
+                        "(roughly every 6-12 syllables) and '။' to end a sentence. "
+                        "Keep each phrase short enough to say in one breath."),
                 name="Burmese")
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
@@ -69,7 +87,11 @@ LANG_CONF = {
             "You are a German (Deutsch) recap-video narrator. Translate every numbered line "
             "below into natural spoken German narration (storyteller style). "
             + _PROMPT_TAIL.format(
-                script="use ONLY German (Latin script), no Chinese letters.", name="German")
+                script="use ONLY German (Latin script), no Chinese letters.",
+                accent=("Use relaxed spoken German (contractions like 'ist's', 'gibt's' are fine, "
+                        "connectors like 'und dann', 'plötzlich', 'also', 'aber') and put a comma "
+                        "at every natural breath point."),
+                name="German")
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
         "clean": r"[^A-Za-zÄÖÜäöüß0-9\s.,!?\"'%\-]",
@@ -95,6 +117,9 @@ LANG_CONF = {
             + _PROMPT_TAIL.format(
                 script="use ONLY Japanese (Kanji, Hiragana, Katakana), no English/Chinese "
                        "letters except kanji.",
+                accent=("Use a warm, natural spoken storyteller tone (mix だ/だった and です/ました "
+                        "naturally, with softeners like でも、そして、すると). Use '、' at every "
+                        "breath point and '。' to end a sentence."),
                 name="Japanese")
         ),
         "font_keys": ("notosanscjk", "notosansjp", "notosansjapanese", "takao", "ipag",
@@ -143,6 +168,7 @@ class Settings:
     sub_size: float = 7.0         # % of width
     sub_pos: int = 90             # 0 = top, 100 = bottom
     sub_alpha: int = 204
+    sub_sweep: bool = True        # music-style light sweep across the subtitle
     font: str = ""                # explicit font path
     # Neon
     neon: bool = True
@@ -441,11 +467,16 @@ def split_for_sub(text, mc=36, lang="my"):
 # ======================================================================
 # overlay
 # ======================================================================
-"""Subtitle overlay (PNG-style, drawn with Pillow), neon border and zoom/flip."""
+"""Subtitle overlay (PNG-style, drawn with Pillow), music sweep, neon border and zoom/flip."""
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
+
+# Music-sweep colours (BGR): trail tints the text cyan as the line is "played",
+# the moving band is a bright white-cyan highlight.
+SWEEP_TRAIL = np.array([255, 235, 60], np.float32)
+SWEEP_BAND = np.array([255, 255, 235], np.float32)
 
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 255),
@@ -453,6 +484,8 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     font = get_font(font_path, fs, layout)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
+    ink_img = Image.new("L", (W, H), 0)       # text-only mask (used by the music sweep)
+    di = ImageDraw.Draw(ink_img)
 
     pad_x, pad_y = int(fs * 0.6), int(fs * 0.5)
     lines = wrap_text(text, font, W - 2 * pad_x, is_mm)
@@ -473,6 +506,7 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
         d.text((lx, ty), ln, font=font, fill=(0, 0, 0, 255),
                stroke_width=sw, stroke_fill=(0, 0, 0, 255))
         d.text((lx, ty), ln, font=font, fill=ink)
+        di.text((lx, ty), ln, font=font, fill=255)
         ty += lh
 
     arr = np.array(img)
@@ -483,11 +517,30 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     crop = arr[y0:y1]
     a = crop[:, :, 3:4].astype(np.float32) / 255.0
     bgr = crop[:, :, [2, 1, 0]].astype(np.float32)
-    return {"y0": y0, "y1": y1, "inv": 1.0 - a, "pre": bgr * a}
+    tm = (np.array(ink_img)[y0:y1].astype(np.float32) / 255.0)[:, :, None]
+    return {"y0": y0, "y1": y1, "inv": 1.0 - a, "pre": bgr * a,
+            "tm": tm, "xs": np.arange(W, dtype=np.float32)[None, :, None]}
 
 
-def blend_overlay(fr, ov):
+def blend_overlay(fr, ov, p=None):
+    """Blend the subtitle onto the frame.
+    p = None -> plain subtitle. p in 0..1 -> music sweep: a bright band glides left->right
+    across the line while the text behind it turns cyan (like a karaoke / equalizer sweep)."""
     reg = fr[ov["y0"]:ov["y1"]].astype(np.float32) * ov["inv"] + ov["pre"]
+    if p is not None:
+        W = reg.shape[1]
+        p = max(0.0, min(float(p), 1.0))
+        c = (-0.12 + 1.24 * p) * W            # band centre (starts / ends just outside the frame)
+        bw = 0.07 * W                          # band half-width
+        x = ov["xs"]
+        band = np.exp(-(((x - c) / bw) ** 2))                      # (1, W, 1)
+        trail = (x < c).astype(np.float32) * 0.55                  # played part
+        tm = ov["tm"]
+        k_trail = np.clip(trail, 0.0, 1.0) * tm
+        reg = reg * (1.0 - k_trail) + SWEEP_TRAIL * k_trail
+        k_band = np.clip(band * 0.95, 0.0, 1.0) * tm
+        reg = reg * (1.0 - k_band) + SWEEP_BAND * k_band
+        reg += band * (1.0 - ov["inv"]) * 22.0                     # soft glow on the black box
     fr[ov["y0"]:ov["y1"]] = np.clip(reg, 0, 255).astype(np.uint8)
 
 
@@ -1038,7 +1091,10 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                                                is_mm=is_mm, **style)
                         cur_k = k
                     if cur_ov:
-                        blend_overlay(fr, cur_ov)
+                        pr = None
+                        if s.sub_sweep:
+                            pr = (t - subs[k][0]) / max(subs[k][1] - subs[k][0], 1e-3)
+                        blend_overlay(fr, cur_ov, pr)
             proc.stdin.write(fr.data)
             j += 1
             if progress and j % 30 == 0:
@@ -1112,7 +1168,7 @@ def _preview_base_frame(src, base_png, height, crop):
 
 
 def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
-    """One frame (subtitle + neon + zoom/flip) -> PNG.
+    """One frame (subtitle + sweep + neon + zoom/flip) -> PNG.
     The expensive ffmpeg step runs only once per (video, height, crop); sliders reuse it."""
     base_png = os.path.join(os.path.dirname(os.path.abspath(out_png)),
                             f"pv_base_{os.path.getsize(src)}_{int(s.height)}_{int(bool(s.crop))}.png")
@@ -1125,7 +1181,7 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
         if ov:
-            blend_overlay(fr, ov)
+            blend_overlay(fr, ov, 0.5 if s.sub_sweep else None)   # sweep frozen at the middle
     cv2.imwrite(out_png, fr)
     return out_png
 
@@ -1456,6 +1512,8 @@ def add_style_args(p):
                    help="mirror မလုပ်ဘူး")
     g = p.add_argument_group("subtitles / neon")
     g.add_argument("--no-sub", dest="sub", action="store_false", default=SUP)
+    g.add_argument("--no-sweep", dest="sub_sweep", action="store_false", default=SUP,
+                   help="စာတန်း music sweep မထည့်ဘူး")
     g.add_argument("--sub-size", type=float, default=SUP, help="%% of width (3-12)")
     g.add_argument("--sub-pos", type=int, default=SUP, help="0=top 100=bottom")
     g.add_argument("--font", default=SUP, help="font file path")
@@ -1753,7 +1811,7 @@ def start_fetch(url, upload, height):
     return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
 
-def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon):
+def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep):
     """Timer က ၁ စက္ကန့်တစ်ခါ ခေါ်မယ် — % ပြ၊ ပြီးရင် Preview ထုတ်ပြီး timer ရပ်။"""
     st = FETCH.get(jid) if jid else None
     if st is None:
@@ -1770,12 +1828,14 @@ def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos,
         return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.Timer(active=False)
     pdir, proj = st["res"]
     mb = os.path.getsize(proj.video) / 1e6
-    img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, False)
+    img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
+                   sweep, False)
     return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ",
             img, gr.Timer(active=False))
 
 
-def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, strict):
+def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
+             strict):
     if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
         if strict:
             raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
@@ -1786,7 +1846,7 @@ def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, 
         s = proj.settings
         s.lang, s.height, s.zoom = code, int(height), float(zoom)
         s.crop, s.flip, s.sub, s.neon = bool(crop), bool(flip), bool(sub), bool(neon)
-        s.sub_size, s.sub_pos = float(sub_size), int(sub_pos)
+        s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
         s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
         font = find_font(code, s.font) if s.sub else None
 
@@ -1835,7 +1895,7 @@ def step1(url, upload, lang_name, model, src_lang, max_min, height, progress=gr.
 # ---------------------------------------------------------------- step 2 (tts + render)
 def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
           height, fps, preset, max_speed, crop, flip, zoom,
-          sub, sub_size, sub_pos, neon, progress=gr.Progress()):
+          sub, sub_size, sub_pos, neon, sweep, progress=gr.Progress()):
     if not pdir or not os.path.isdir(pdir):
         raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
     code = LANGS[lang_name]
@@ -1854,6 +1914,7 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
         s.height, s.fps, s.preset = int(height), int(fps), preset
         s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
         s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
+        s.sub_sweep = bool(sweep)
         s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
         prog = Progress(0.0, 1.0, parent=_cb(progress))
         res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None,
@@ -1876,7 +1937,7 @@ def reset_all(pdir):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 5`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 6`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -1913,25 +1974,26 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     with gr.Accordion("🎛️ စာတန်း / Neon / Mirror", open=False):
         with gr.Row():
             sub = gr.Checkbox(True, label="စာတန်း")
+            sweep = gr.Checkbox(True, label="🎵 Music sweep")
             neon = gr.Checkbox(True, label="Neon")
             flip = gr.Checkbox(True, label="Mirror")
         sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
         sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
         zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
-    pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon]
+    pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep]
     fetch_job = gr.State("")
     fetch_timer = gr.Timer(1.0, active=False)
     for trig in (url.submit, b_fetch.click, upload.upload):
         trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
     fetch_timer.tick(poll_fetch,
-                     [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon],
+                     [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep],
                      [pdir_state, status_fetch, pv_img, fetch_timer],
                      show_progress="hidden")
 
     # Slider: .release က phone (touch) မှာ မခံစားရလို့ .change သုံးတယ်၊
     # always_last = ဆွဲနေတုန်း တန်းစီမနေဘဲ နောက်ဆုံးတန်ဖိုးပဲ ယူမယ်
-    for c in (sub_size, sub_pos, zoom, sub, neon, flip, lang):
+    for c in (sub_size, sub_pos, zoom, sub, sweep, neon, flip, lang):
         c.change(preview_auto, pv_in, pv_img,
                  trigger_mode="always_last", show_progress="hidden", queue=True)
 
@@ -1956,7 +2018,7 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     b1.click(step1, [url, upload, lang, model, src_lang, max_min, height],
              [pdir_state, status1, prompt])
     b2.click(step2, [pdir_state, translated, lang, engine, voice, rate, workers, vox_ref, height,
-                     fps, preset, max_speed, crop, flip, zoom, sub, sub_size, sub_pos, neon],
+                     fps, preset, max_speed, crop, flip, zoom, sub, sub_size, sub_pos, neon, sweep],
              [video, dl, status2])
     b3.click(reset_all, pdir_state,
              [pdir_state, status_fetch, status1, prompt, translated, pv_img, video, dl, status2])
