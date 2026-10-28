@@ -1,8 +1,8 @@
 """Recap CLI (single file): Whisper -> Gemini (manual) -> TTS -> smart-sync render.
 
-Usage: python recap.py run <video|url> -d work/ep1 --lang my --gemini-video
+Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.3.0"
+__version__ = "1.2.0"
 
 # ======================================================================
 # config
@@ -25,23 +25,6 @@ VOX_SPACES = [
 ]
 
 VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".flv")
-
-# Gemini-upload video levels (smaller = lower resolution / fps / bitrate).
-# Gemini samples video at ~1 frame per second, so low fps is fine; the speech audio matters most.
-GEM_LEVELS = {
-    "tiny":   {"height": 144, "fps": 3, "crf": 38, "abr": 20},
-    "small":  {"height": 240, "fps": 4, "crf": 35, "abr": 24},
-    "normal": {"height": 360, "fps": 6, "crf": 32, "abr": 32},
-}
-
-# Extra note put in front of the prompt when a video is attached to Gemini.
-VIDEO_NOTE = (
-    "A low-resolution copy of the episode is attached to this message. Watch and listen to it "
-    "ONLY to work out who is speaking, the character names, gender, age and relationships, and "
-    "to fix speech-to-text mistakes in the numbered lines. All rules below still apply 100%: "
-    "one output line per input line with the same numbers; do NOT describe the video and do NOT "
-    "add anything that is not in the numbered lines.\n\n"
-)
 
 # Human-like narration rules (added to every language prompt).
 # NOTE: the cleaner removes "…" and emoji, so we only ask for the language's own
@@ -898,11 +881,9 @@ import re
 
 
 
-def build_prompt(units, lang="my", video=False):
-    """video=True -> adds a note that a (compressed) copy of the episode is attached in Gemini."""
+def build_prompt(units, lang="my"):
     lines = "\n".join(f"[{i}] {u['src']}" for i, u in enumerate(units))
-    head = VIDEO_NOTE if video else ""
-    return head + LANG_CONF[lang]["prompt"] + lines
+    return LANG_CONF[lang]["prompt"] + lines
 
 
 def parse_numbered(text, n):
@@ -917,92 +898,6 @@ def parse_numbered(text, n):
         if len(plain) == n:
             got = {i: plain[i] for i in range(n)}
     return got
-
-# ======================================================================
-# gemini video (tiny upload copy)
-# ======================================================================
-"""Make a very small copy of the video to upload to the Gemini app together with the prompt."""
-import glob
-import os
-
-
-def _probe_wh(path):
-    try:
-        out = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                  "-show_entries", "stream=width,height", "-of", "csv=p=0", path]).strip()
-        w, h = out.split(",")[:2]
-        return int(w), int(h)
-    except Exception:
-        return 0, 0
-
-
-def compress_for_gemini(src, dst, level="tiny", height=0, fps=0, crf=0, abr=0,
-                        target_mb=0.0, crop=True, audio=True, progress=None):
-    """Re-encode `src` into the smallest practical MP4 for the Gemini app.
-
-    level      tiny (144p) | small (240p) | normal (360p) - presets, overridden by height/fps/crf/abr
-    target_mb  > 0 -> two-pass encode aimed at about this file size (MB); 0 -> CRF mode
-    audio      False -> drop the audio track (smallest, but Gemini can't hear the speech)
-    Returns the size of `dst` in MB."""
-    progress = progress or (lambda f, l=None: None)
-    lv = GEM_LEVELS.get(level, GEM_LEVELS["tiny"])
-    height = max(96, int(height or lv["height"])) // 2 * 2
-    fps = max(1, int(fps or lv["fps"]))
-    crf = int(crf or lv["crf"])
-    abr = max(8, int(abr or lv["abr"]))
-
-    progress(0.02, "Gemini video ပြင်နေတယ်")
-    vf = []
-    if crop:
-        try:
-            c = detect_crop(src)
-            w0, h0 = _probe_wh(src)
-            if c and h0 and c[1] < h0 * 0.95 and c[0] > 0 and c[1] > 0:
-                vf.append(f"crop={c[0]}:{c[1]}:{c[2]}:{c[3]}")
-        except Exception:
-            pass
-    vf.append(f"scale=-2:'min(ih,{height})'")
-    vf.append(f"fps={fps}")
-    vf = ",".join(vf)
-
-    base = ["ffmpeg", "-y", "-i", src, "-vf", vf, "-sn", "-dn", "-map_metadata", "-1"]
-    venc = ["-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p", "-g", str(fps * 10)]
-    if audio:
-        maps = ["-map", "0:v:0", "-map", "0:a:0?"]
-        aenc = ["-c:a", "aac", "-b:a", f"{abr}k", "-ar", "16000", "-ac", "1"]
-    else:
-        maps = ["-map", "0:v:0"]
-        aenc = ["-an"]
-    tail = ["-movflags", "+faststart", dst]
-
-    if target_mb and target_mb > 0:
-        dur = max(probe_duration(src), 1.0)
-        total_kbits = float(target_mb) * 8000.0 * 0.95           # keep ~5% headroom
-        a_kbps = abr if audio else 0
-        vk = int(max(12, total_kbits / dur - a_kbps))
-        if total_kbits / dur - a_kbps < 12:
-            log(f"⚠️ {target_mb}MB က {dur / 60:.1f} မိနစ်အတွက် သေးလွန်းတယ် — ရလာတဲ့ဖိုင် ပိုကြီးနိုင်တယ်")
-        plog = dst + "_2pass"
-        try:
-            progress(0.1, "Gemini video (pass 1/2)")
-            sh(base + ["-map", "0:v:0"] + venc +
-               ["-b:v", f"{vk}k", "-pass", "1", "-passlogfile", plog, "-an", "-f", "null", os.devnull])
-            progress(0.55, "Gemini video (pass 2/2)")
-            sh(base + maps + venc +
-               ["-b:v", f"{vk}k", "-maxrate", f"{int(vk * 1.5)}k", "-bufsize", f"{int(vk * 3)}k",
-                "-pass", "2", "-passlogfile", plog] + aenc + tail)
-        finally:
-            for f in glob.glob(plog + "*"):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-    else:
-        progress(0.1, "Gemini video ချုံ့နေတယ်")
-        sh(base + maps + venc + ["-crf", str(crf)] + aenc + tail)
-
-    progress(1.0, "Gemini video ပြီးပြီ")
-    return os.path.getsize(dst) / 1e6
 
 # ======================================================================
 # tts
@@ -1353,14 +1248,6 @@ class Project:
         return os.path.join(self.path, "prompt.txt")
 
     @property
-    def prompt_video_file(self):
-        return os.path.join(self.path, "prompt_video.txt")
-
-    @property
-    def gemini_video(self):
-        return os.path.join(self.path, "gemini.mp4")
-
-    @property
     def translated_file(self):
         return os.path.join(self.path, "translated.txt")
 
@@ -1446,29 +1333,10 @@ def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, la
     return info
 
 
-def write_prompt(proj, lang, video=False):
-    """video=False -> prompt.txt, video=True -> prompt_video.txt (with the 'video attached' note)."""
-    path = proj.prompt_video_file if video else proj.prompt_file
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(build_prompt(proj.units, lang, video))
-    return path
-
-
-# ---------------------------------------------------------------- gemini upload pack
-def make_gemini_pack(proj, lang=None, level="tiny", height=0, fps=0, crf=0, abr=0,
-                     target_mb=0.0, audio=True, progress=None):
-    """Build gemini.mp4 (tiny copy of the source) + prompt_video.txt.
-    Returns (video_path, size_mb, prompt_path_or_None)."""
-    if not os.path.exists(proj.video):
-        raise RuntimeError("video မရှိသေးပါ — recap init အရင်လုပ်ပါ")
-    mb = compress_for_gemini(proj.video, proj.gemini_video, level, height, fps, crf, abr,
-                             target_mb, True, audio, progress)
-    prompt_path = None
-    if proj.units:
-        prompt_path = write_prompt(proj, lang or proj.settings.lang, video=True)
-    proj.data["gemini"] = {"level": level, "mb": round(mb, 2)}
-    proj.save()
-    return proj.gemini_video, mb, prompt_path
+def write_prompt(proj, lang):
+    with open(proj.prompt_file, "w", encoding="utf-8") as f:
+        f.write(build_prompt(proj.units, lang))
+    return proj.prompt_file
 
 
 # ---------------------------------------------------------------- apply translation
@@ -1645,8 +1513,7 @@ def run_render(proj, s, proxy=None, hf_token=None, progress=None):
 """Command-line interface.
 
   recap init <video|url> -d work/ep1        download / copy video into a project
-  recap transcribe work/ep1 --lang my       Whisper -> units + prompt.txt  (+ --gemini-video)
-  recap gemvid work/ep1                     tiny gemini.mp4 + prompt_video.txt for the Gemini app
+  recap transcribe work/ep1 --lang my       Whisper -> units + prompt.txt
   recap apply work/ep1 [translated.txt]     fill translations from Gemini's reply
   recap render work/ep1                     TTS + smart-sync render -> final.mp4
   recap preview work/ep1                    one PNG frame to check subtitle/neon style
@@ -1702,23 +1569,6 @@ def add_whisper_args(p):
                    help="video အရှည် ကန့်သတ် (မိနစ်) · 0 = ကန့်သတ်မရှိ")
 
 
-def add_gemini_args(p, with_flag=True):
-    g = p.add_argument_group("gemini video (Gemini app ကို တင်ဖို့ ဖိုင်သေးသေး)")
-    if with_flag:
-        g.add_argument("--gemini-video", action="store_true",
-                       help="gemini.mp4 (ချုံ့ပြီးသား video) + prompt_video.txt ပါ ထုတ်ပေး")
-    g.add_argument("--gem-level", choices=list(GEM_LEVELS), default="tiny",
-                   help="tiny=144p (အသေးဆုံး) | small=240p | normal=360p")
-    g.add_argument("--gem-mb", type=float, default=0.0,
-                   help="ပစ်မှတ် ဖိုင်အရွယ် MB (2-pass) · 0 = level အတိုင်း")
-    g.add_argument("--gem-height", type=int, default=0, help="level ကို override (px)")
-    g.add_argument("--gem-fps", type=int, default=0, help="level ကို override")
-    g.add_argument("--gem-crf", type=int, default=0, help="level ကို override (ကြီး = သေး)")
-    g.add_argument("--gem-abr", type=int, default=0, help="audio kbps (level ကို override)")
-    g.add_argument("--gem-no-audio", action="store_true",
-                   help="အသံဖြုတ် (ပိုသေးပေမယ့် Gemini က စကားသံ မကြားရ)")
-
-
 def settings_for(proj, args):
     s = proj.settings
     for k, v in vars(args).items():
@@ -1750,29 +1600,6 @@ def cmd_init(args):
     return proj
 
 
-def cmd_gemvid(args, proj=None):
-    """Tiny video for the Gemini app (+ prompt_video.txt when Whisper units already exist)."""
-    proj = proj or Project.load(args.dir)
-    lang = getattr(args, "lang", None) or proj.settings.lang
-    prog = Progress()
-    path, mb, prompt_path = make_gemini_pack(
-        proj, lang,
-        level=getattr(args, "gem_level", "tiny"),
-        height=getattr(args, "gem_height", 0), fps=getattr(args, "gem_fps", 0),
-        crf=getattr(args, "gem_crf", 0), abr=getattr(args, "gem_abr", 0),
-        target_mb=getattr(args, "gem_mb", 0.0),
-        audio=not getattr(args, "gem_no_audio", False), progress=prog)
-    prog.done()
-    orig = os.path.getsize(proj.video) / 1e6
-    print(f"✅ Gemini video: {path}  ({mb:.2f} MB · မူရင်း {orig:.1f} MB)")
-    if prompt_path:
-        print(f"   Prompt (video မှတ်စုပါ): {prompt_path}")
-        print("   → gemini.mp4 ကို Gemini app ထဲ တင် + prompt_video.txt ကို paste လုပ်ပါ")
-    else:
-        print("   (စာသားမထုတ်ရသေးလို့ prompt မထုတ်ဘူး — recap transcribe လုပ်ပြီးရင် ပြန် run ပါ)")
-    return path
-
-
 def cmd_transcribe(args, proj=None):
     proj = proj or Project.load(args.dir)
     lang = getattr(args, "lang", None) or proj.settings.lang
@@ -1781,10 +1608,7 @@ def cmd_transcribe(args, proj=None):
                           lang, prog)
     prog.done()
     print(f"✅ {info}\n   Prompt: {proj.prompt_file}")
-    if getattr(args, "gemini_video", False):
-        cmd_gemvid(args, proj)
-    else:
-        print("   → prompt.txt ကို Gemini ထဲ paste၊ ရလဒ်ကို translated.txt အဖြစ် သိမ်းပြီး `recap apply` လုပ်ပါ")
+    print("   → prompt.txt ကို Gemini ထဲ paste၊ ရလဒ်ကို translated.txt အဖြစ် သိမ်းပြီး `recap apply` လုပ်ပါ")
     return proj
 
 
@@ -1857,23 +1681,15 @@ def cmd_run(args):
     proj.save()
     args.lang = s.lang
     if not proj.units:
-        cmd_transcribe(args, proj)          # also makes gemini.mp4 when --gemini-video
+        cmd_transcribe(args, proj)
     else:
         log("• units ရှိပြီးသား၊ whisper ကျော်မယ်")
         write_prompt(proj, s.lang)
-        if getattr(args, "gemini_video", False):
-            cmd_gemvid(args, proj)
 
     src = args.translated or proj.translated_file
     if not os.path.exists(src):
-        use_video = getattr(args, "gemini_video", False) and os.path.exists(proj.prompt_video_file)
-        pf = proj.prompt_video_file if use_video else proj.prompt_file
-        print(f"\n📋 Prompt: {pf}")
-        if use_video:
-            print(f"   ① {proj.gemini_video} ကို Gemini app ထဲ တင် + prompt_video.txt ကို paste")
-        else:
-            print("   ① prompt.txt ကို Gemini မှာ paste")
-        print(f"   ② ရလဒ်ကို {src} မှာ သိမ်း")
+        print(f"\n📋 Prompt: {proj.prompt_file}")
+        print(f"   ① prompt.txt ကို Gemini မှာ paste  ② ရလဒ်ကို {src} မှာ သိမ်း")
         if not sys.stdin.isatty():
             sys.exit(f"\n⏸️ translated ဖိုင်မရှိလို့ ရပ်လိုက်တယ်။ ဖြည့်ပြီးရင် `recap run ... --translated {src}` "
                      "(သို့) `recap apply` + `recap render` လုပ်ပါ")
@@ -1902,14 +1718,7 @@ def build_parser():
     a.add_argument("dir")
     a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de | ja")
     add_whisper_args(a)
-    add_gemini_args(a)
     a.set_defaults(fn=cmd_transcribe)
-
-    a = sub.add_parser("gemvid", help="Gemini app အတွက် video အသေးဆုံးချုံ့ + prompt_video.txt")
-    a.add_argument("dir")
-    a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de | ja")
-    add_gemini_args(a, with_flag=False)
-    a.set_defaults(fn=cmd_gemvid)
 
     a = sub.add_parser("prompt", help="Gemini prompt ပြန်ထုတ် (ဘာသာစကားပြောင်းချင်ရင်)")
     a.add_argument("dir")
@@ -1942,7 +1751,6 @@ def build_parser():
     a.add_argument("-o", "--output")
     a.add_argument("--cookies")
     add_whisper_args(a)
-    add_gemini_args(a)
     add_style_args(a)
     a.set_defaults(fn=cmd_run)
     return p
@@ -1975,9 +1783,6 @@ os.makedirs(BASE, exist_ok=True)
 PORT = int(os.environ.get("PORT", "7860"))
 
 LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "ဂျပန်": "ja"}
-
-# Gemini video size levels shown in the UI
-GEM_UI = {"အသေးဆုံး (144p)": "tiny", "သေး (240p)": "small", "ပုံမှန် (360p)": "normal"}
 
 
 def voices_for(code):
@@ -2107,32 +1912,21 @@ def preview_auto(*a):
     return _preview(*a, False)
 
 
-# ---------------------------------------------------------------- step 1 (whisper + gemini video)
-def step1(url, upload, lang_name, model, src_lang, max_min, height,
-          gem_on, gem_level, gem_mb, progress=gr.Progress()):
+# ---------------------------------------------------------------- step 1 (whisper)
+def step1(url, upload, lang_name, model, src_lang, max_min, height, progress=gr.Progress()):
     code = LANGS[lang_name]
     cb = _cb(progress)
-    gem_path, gem_note = None, ""
     try:
         cb(0.0, "Video ယူနေတယ်...")
         pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
-        use_gem = bool(gem_on)
-        tr = Progress(0.2, 0.85 if use_gem else 1.0, parent=lambda f, l=None: cb(f, l))
+        tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
         info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
-        if use_gem:
-            gp = Progress(0.85, 1.0, parent=lambda f, l=None: cb(f, l))
-            gem_path, mb, _pp = make_gemini_pack(
-                proj, code, level=GEM_UI.get(gem_level, "tiny"),
-                target_mb=float(gem_mb or 0), progress=gp)
-            orig = os.path.getsize(proj.video) / 1e6
-            gem_note = f" · 🎞️ Gemini video {mb:.2f} MB (မူရင်း {orig:.1f} MB)"
     except gr.Error:
         raise
     except Exception as ex:
         raise gr.Error(str(ex)[:600])
-    pf = proj.prompt_video_file if gem_path else proj.prompt_file
-    prompt_text = open(pf, encoding="utf-8").read()
-    return pdir, f"✅ {info}{gem_note}", prompt_text, gem_path
+    prompt_text = open(proj.prompt_file, encoding="utf-8").read()
+    return pdir, f"✅ {info}", prompt_text
 
 
 # ---------------------------------------------------------------- step 2 (tts + render)
@@ -2175,12 +1969,12 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
 def reset_all(pdir):
     if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
         shutil.rmtree(pdir, ignore_errors=True)
-    return "", "", "", "", "", None, None, None, None, "🗑️ ရှင်းပြီး"
+    return "", "", "", "", "", None, None, None, "🗑️ ရှင်းပြီး"
 
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 8`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 7`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -2241,14 +2035,8 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
                  trigger_mode="always_last", show_progress="hidden", queue=True)
 
     gr.Markdown("### 1️⃣ စာသားထုတ်")
-    with gr.Accordion("🎞️ Gemini app အတွက် video ဖိုင်သေးသေး", open=True):
-        gem_on = gr.Checkbox(True, label="Gemini ကို တင်ဖို့ video ချုံ့ပေး (gemini.mp4 + prompt)")
-        with gr.Row():
-            gem_level = gr.Radio(list(GEM_UI), value="အသေးဆုံး (144p)", label="အရွယ်အစား")
-            gem_mb = gr.Number(value=0, minimum=0, label="ပစ်မှတ် MB (0 = အလိုအလျောက်)")
     b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
     status1 = gr.Markdown()
-    gem_file = gr.File(label="🎞️ Gemini ကို တင်မယ့် video (ချုံ့ပြီး)")
     with gr.Accordion("📋 Gemini Prompt", open=False):
         prompt = gr.Textbox(label="Gemini Prompt (Copy ယူပြီး Gemini မှာ paste)", lines=8,
                             interactive=False, show_copy_button=True)
@@ -2264,17 +2052,13 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     dl = gr.File(label="⬇️ Download MP4")
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-    b1.click(step1, [url, upload, lang, model, src_lang, max_min, height, gem_on, gem_level, gem_mb],
-             [pdir_state, status1, prompt, gem_file])
+    b1.click(step1, [url, upload, lang, model, src_lang, max_min, height],
+             [pdir_state, status1, prompt])
     b2.click(step2, [pdir_state, translated, lang, engine, voice, rate, workers, vox_ref, height,
                      fps, preset, max_speed, crop, flip, zoom, sub, sub_size, sub_pos, neon, sweep],
              [video, dl, status2])
     b3.click(reset_all, pdir_state,
-             [pdir_state, status_fetch, status1, prompt, translated, pv_img, video, dl, gem_file, status2])
+             [pdir_state, status_fetch, status1, prompt, translated, pv_img, video, dl, status2])
 
 if __name__ == "__main__":
-    # CLI when arguments are given (python recap.py run ...), otherwise the web UI
-    if len(sys.argv) > 1:
-        main()
-    else:
-        demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
+    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
