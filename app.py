@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 # ======================================================================
 # config
@@ -60,7 +60,7 @@ _STORY = (
     "NO PRONOUNS (very important): NEVER use any pronoun for a character, in any form "
     "(subject, object or possessive). That means no he, she, him, her, his, they, them, their, "
     "I, me, my, you, your, we, us, and no equivalent word in the target language "
-    "(Burmese: သူ, သူ့, သူမ, သူတို့, ကျွန်တော်, ကျွန်တော်တို့, ကျွန်မ, ကျွန်မတို့, ငါ, ငါတို့, "
+    "(Burmese: သူ, သူ့, သူမ, သူတို့, ကျွန်တော်တို့, ကျွန်မ, ကျွန်မတို့, ငါ, ငါတို့, "
     "နင်, နင်တို့, မင်း, မင်းတို့, ခင်ဗျား, ရှင်, ကျွန်ုပ်; "
     "German: er, sie, ihn, ihm, ihr, sein, ich, du, wir, ihr, mich, dich; "
     "Japanese: 彼, 彼女, 彼ら, 私, 僕, 俺, あなた, お前, 君). "
@@ -69,17 +69,21 @@ _STORY = (
     "Never replace a name with a pronoun to avoid repetition. "
     "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
     "name for the character and spell it the same way every time. If the name is NOT known, "
-    "never use a pronoun and never write 'the person' or 'someone'. Instead call the character "
-    "by a simple role or look-based word chosen from age and gender, and keep the same word for "
-    "the same person from start to end. "
-    "For Burmese use words like: ကောင်လေး (young man or boy), ကောင်မလေး (young woman or girl), "
-    "ဦးကြီး (older man), အဒေါ်ကြီး (older woman), အဘိုးကြီး (very old man), အဘွားကြီး (very old woman), "
-    "ကလေးလေး (small child), လူလတ်ပိုင်း (middle-aged person). "
+    "never use any other pronoun and never write 'the person', 'a person' or 'someone'. "
+    "BURMESE UNNAMED CHARACTER (very important): NEVER write လူတစ်ယောက် (a person), "
+    "လူတစ်ဦး or တစ်ယောက် for a character. Whenever the character's name is not known, "
+    "write ကျွန်တော် in that place instead (for example: ကျွန်တော်က ... လို့ ပြောပါတယ်), "
+    "and keep ကျွန်တော် for that same character from start to end. "
     "If the relationship is clear from the dialogue, prefer it (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, "
     "သူဌေး, ဧည့်သည်) and attach the character name before it when the name is known "
     "(example pattern: the name + ရဲ့ + relationship word). "
-    "For other languages use the equivalent natural words (German: der junge Mann, die junge Frau, "
-    "der alte Mann, die ältere Frau; Japanese: 青年, 少女, 老人, おばさん). "
+    "If a second unnamed character appears in the same scene, use a role word for that second "
+    "character (ကောင်မလေး young woman or girl, ဦးကြီး older man, အဒေါ်ကြီး older woman, "
+    "ကလေးလေး small child) so the two characters are never mixed up. "
+    "For other languages, when the name is unknown, call the character by a simple role or "
+    "look-based word chosen from age and gender and keep the same word for the same person "
+    "(German: der junge Mann, die junge Frau, der alte Mann, die ältere Frau; "
+    "Japanese: 青年, 少女, 老人, おばさん). "
     "Speech-to-text often misspells names: if two similar-sounding names appear, treat them as "
     "the same person and use one spelling throughout. "
 )
@@ -114,10 +118,10 @@ LANG_CONF = {
                         "(၏၊ သည်၊ ၍). "
                         "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
                         "Transliterate spoken names into Burmese script the same way every time; "
-                        "never use pronouns such as သူ၊ သူ့၊ သူမ၊ သူတို့၊ ကျွန်တော်၊ ကျွန်မ၊ ငါ၊ နင်၊ မင်း — "
+                        "never use pronouns such as သူ၊ သူ့၊ သူမ၊ သူတို့၊ ကျွန်မ၊ ငါ၊ နင်၊ မင်း — "
                         "always repeat the character name instead; "
-                        "when a name is unknown use ကောင်လေး / ကောင်မလေး / ဦးကြီး / အဒေါ်ကြီး "
-                        "style words consistently."),
+                        "when a name is unknown NEVER write လူတစ်ယောက် — write ကျွန်တော် "
+                        "instead, consistently for the same character."),
                 name="Burmese")
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
@@ -283,7 +287,13 @@ def fmt_t(sec):
     return f"{sec:.1f}s" if sec < 60 else f"{int(sec // 60)}m {sec % 60:.0f}s"
 
 
+# "a person" (လူတစ်ယောက်) -> ကျွန်တော်  (Burmese only; safety net in case Gemini still writes it)
+_MM_PERSON = re.compile(r"လူတစ်ယောက်|လူတစ်ဦး|လူတယောက်")
+
+
 def clean_text(text, lang="my"):
+    if lang == "my":
+        text = _MM_PERSON.sub("ကျွန်တော်", text)
     return re.sub(LANG_CONF[lang]["clean"], "", text).strip()
 
 
@@ -915,7 +925,8 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
         lines = "\n".join(f"[{i}] {units[i]['src']}" for i in range(lo, hi))
         note = (f"(PART {k + 1} of {total} of the same episode. Only lines [{lo}] to [{hi - 1}]. "
                 f"Keep the SAME numbers. Keep character names and role words consistent "
-                f"with the other parts. Never use pronouns, always repeat the character name.)\n\n")
+                f"with the other parts. Never use pronouns, always repeat the character name. "
+                f"For Burmese, when a name is unknown write ကျွန်တော် instead of လူတစ်ယောက်.)\n\n")
         out.append({"lo": lo, "hi": hi, "text": head + note + lines})
     return out
 
@@ -1850,6 +1861,13 @@ def _source(url, upload):
     return up or (url or "").strip()
 
 
+def _pbar(frac, width=20):
+    """Text progress bar for Markdown status boxes."""
+    frac = max(0.0, min(float(frac), 1.0))
+    fill = int(width * frac)
+    return "█" * fill + "░" * (width - fill)
+
+
 def _ensure_video(url, upload, height, cb):
     """Download/copy the video once (same source -> same folder -> reused)."""
     source = _source(url, upload)
@@ -1958,21 +1976,62 @@ def preview_auto(*a):
     return _preview(*a, False)
 
 
-# ---------------------------------------------------------------- step 1 (whisper)
-def step1(url, upload, lang_name, model, src_lang, max_min, height, progress=gr.Progress()):
+# ---------------------------------------------------------------- step 1 (whisper) + live %
+TRANS = {}   # job id -> state (background Whisper jobs)
+
+
+def start_step1(url, upload, lang_name, model, src_lang, max_min, height):
+    """1️⃣ ခလုတ်နှိပ်တာနဲ့ ချက်ချင်း return လုပ်ပြီး Whisper ကို နောက်ကွယ်မှာ run ပြီး၊
+    Timer က ၁ စက္ကန့်တစ်ခါ % ကို ပြမယ်။"""
+    if not _source(url, upload):
+        raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
     code = LANGS[lang_name]
-    cb = _cb(progress)
-    try:
-        cb(0.0, "Video ယူနေတယ်...")
-        pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
-        tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
-        info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
-    except gr.Error:
-        raise
-    except Exception as ex:
-        raise gr.Error(str(ex)[:600])
-    chunks = build_prompt_chunks(proj.units, code)
-    return pdir, f"✅ {info} · Prompt {len(chunks)} ပိုင်း", chunks, {}
+    jid = uuid.uuid4().hex[:8]
+    st = {"f": 0.0, "label": "စတင်နေတယ်...", "res": None, "err": None,
+          "done": False, "t0": time.time()}
+    TRANS[jid] = st
+
+    def cb(f, label=None):
+        st["f"] = max(0.0, min(float(f), 1.0))
+        if label:
+            st["label"] = label
+
+    def work():
+        try:
+            cb(0.0, "Video ယူနေတယ်...")
+            pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
+            tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
+            info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
+            chunks = build_prompt_chunks(proj.units, code)
+            st["res"] = (pdir, info, chunks)
+        except BaseException as ex:
+            st["err"] = ex
+        finally:
+            st["done"] = True
+
+    threading.Thread(target=work, daemon=True).start()
+    return jid, "⏳ စတင်နေတယ်... 0%", gr.Timer(active=True), gr.update(interactive=False)
+
+
+def poll_step1(jid):
+    """Timer tick — % + progress bar ပြ၊ ပြီးရင် Prompt အပိုင်းတွေ ထုတ်ပြီး timer ရပ်။"""
+    st = TRANS.get(jid) if jid else None
+    if st is None:
+        return (gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+                gr.Timer(active=False), gr.update(interactive=True))
+    elapsed = time.time() - st["t0"]
+    if not st["done"]:
+        pct = int(st["f"] * 100)
+        msg = f"⏳ {st['label']}\n\n`[{_pbar(st['f'])}] {pct}%` · {elapsed:.0f}s"
+        return gr.skip(), msg, gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    TRANS.pop(jid, None)
+    if st["err"] is not None:
+        return (gr.skip(), f"❌ {str(st['err'])[:500]}", gr.skip(), gr.skip(),
+                gr.Timer(active=False), gr.update(interactive=True))
+    pdir, info, chunks = st["res"]
+    return (pdir,
+            f"✅ 100% · {info} · Prompt {len(chunks)} ပိုင်း · {elapsed:.0f}s",
+            chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
 
 
 # ---------------------------------------------------------------- step 2 (tts + render)
@@ -2037,7 +2096,7 @@ def make_setter(lo, hi):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 9`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 10`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -2101,6 +2160,8 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     gr.Markdown("### 1️⃣ စာသားထုတ်")
     b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
     status1 = gr.Markdown()
+    trans_job = gr.State("")
+    trans_timer = gr.Timer(1.0, active=False)
 
     chunks_state = gr.State([])
     parts_state = gr.State({})
@@ -2131,8 +2192,13 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     dl = gr.File(label="⬇️ Download MP4")
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-    b1.click(step1, [url, upload, lang, model, src_lang, max_min, height],
-             [pdir_state, status1, chunks_state, parts_state])
+    # 1️⃣ Whisper: ခလုတ်နှိပ်ရင် job စပြီး Timer က status1 မှာ % ကို ၁ စက္ကန့်တစ်ခါ update လုပ်မယ်
+    b1.click(start_step1, [url, upload, lang, model, src_lang, max_min, height],
+             [trans_job, status1, trans_timer, b1])
+    trans_timer.tick(poll_step1, trans_job,
+                     [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
+                     show_progress="hidden")
+
     b2.click(step2, [pdir_state, translated, parts_state, lang, engine, voice, rate, workers,
                      vox_ref, height, fps, preset, max_speed, crop, flip, zoom,
                      sub, sub_size, sub_pos, neon, sweep],
