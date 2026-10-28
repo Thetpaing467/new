@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 # ======================================================================
 # config
@@ -60,6 +60,21 @@ _STORY = (
     "Keep insults, jokes, arguments and emotions of the original, but report them rather than act "
     "them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not in the "
     "source lines. Do NOT address the audience. "
+    "REPORTING VERB VARIETY (very important, especially for Burmese): NEVER repeat the same "
+    "reporting verb in two consecutive lines, and never fall into a pattern where most lines "
+    "use the same generic verb (for Burmese, 'ပြောတယ်'). Rotate through the whole vocabulary of "
+    "reporting and reaction verbs that fit the scene — for Burmese prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, "
+    "ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ်, ညည်းတယ်, သတိပေးတယ်, တိုက်တွန်းတယ်, ကတိပေးတယ်, ငြင်းတယ်, "
+    "ဝန်ခံတယ်, ရယ်တယ်, ခြိမ်းခြောက်တယ်, ခေါ်တယ်, ပြောလိုက်တယ်, ဆူတယ်, နှစ်သိမ့်တယ်; for German "
+    "sagte, fragte, antwortete, erklärte, erwiderte, rief, flüsterte, warnte, versprach, "
+    "leugnete, gab zu, lachte, drohte, bat; for Japanese 言った, 尋ねた, 答えた, 説明した, "
+    "返した, 叫んだ, 囁いた, 警告した, 約束した, 否定した, 認めた, 笑った, 脅した, 頼んだ. "
+    "The generic Burmese verb 'ပြောတယ်' may appear at most ONCE every four lines — prefer the "
+    "more specific verbs above first. "
+    "Also vary the sentence shape: sometimes put the reported speech first and the verb last, "
+    "sometimes put the reaction/action first and the speech after. Where the action alone makes "
+    "the meaning clear, you may drop the reporting verb entirely and state what happened "
+    "(for Burmese, e.g. '... လို့ မေးလိုက်တော့ အမေက ခေါင်းညိတ်တယ်'). "
     "NO PRONOUNS (very important): NEVER use any pronoun for a character, in any form "
     "(subject, object or possessive). That means no he, she, him, her, his, they, them, their, "
     "I, me, my, you, your, we, us, and no equivalent word in the target language "
@@ -117,10 +132,18 @@ LANG_CONF = {
                         "ပါတယ် ONLY when it is really needed (a respectful request, a formal "
                         "statement, or a very polite speaker), at most about one line in five, and "
                         "never in two lines in a row. Normally end lines with plain spoken endings "
-                        "such as တယ်။ (ပြောတယ်၊ မေးတယ်၊ ဖြေတယ်၊ ပြန်ပြောတယ်), ခဲ့တယ်။, လိုက်တယ်။, "
+                        "such as တယ်။ (ဆိုတယ်၊ မေးတယ်၊ ဖြေတယ်၊ ပြန်ပြောတယ်), ခဲ့တယ်။, လိုက်တယ်။, "
                         "နေတယ်။, တော့တယ်။, ပြီ။, လေ။, ပေါ့။, and vary the ending from line to line. "
-                        "Report speech with patterns like '... လို့ ပြောတယ်', "
-                        "'... လို့ မေးလိုက်တော့ ...', '... ဆိုပြီး ...', '... လို့ ပြန်ထောက်ပြတယ်'. "
+                        "Report speech with a VARIETY of verbs and structures, never the same "
+                        "verb twice in a row and never 'ပြောတယ်' more than once every four lines. "
+                        "Choose from: '... လို့ ဆိုတယ်', '... လို့ မေးတယ်', '... လို့ ဖြေတယ်', "
+                        "'... လို့ ရှင်းပြတယ်', '... လို့ ပြန်ပြောတယ်', '... လို့ အော်တယ်', "
+                        "'... လို့ ညည်းတယ်', '... လို့ သတိပေးတယ်', '... လို့ တိုက်တွန်းတယ်', "
+                        "'... လို့ ကတိပေးတယ်', '... လို့ ငြင်းတယ်', '... လို့ ဝန်ခံတယ်', "
+                        "'... လို့ ရယ်တယ်', '... လို့ ခြိမ်းခြောက်တယ်'. "
+                        "Where the action already shows what happened, you may drop the "
+                        "reporting verb and just state the action "
+                        "(e.g. '... လို့ မေးလိုက်တော့ အမေက ခေါင်းညိတ်တယ်'). "
                         "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
                         "(၏၊ သည်၊ ၍). "
                         "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
@@ -154,7 +177,12 @@ LANG_CONF = {
                 accent=("Use relaxed spoken German (contractions like 'ist's', 'gibt's' are fine, "
                         "connectors like 'und dann', 'plötzlich', 'also', 'aber') and put a comma "
                         "at every natural breath point. Never use personal pronouns for characters "
-                        "(er, sie, ihn, ihm, ihr, sein, ich, du, wir); repeat the character name instead."),
+                        "(er, sie, ihn, ihm, ihr, sein, ich, du, wir); repeat the character name instead. "
+                        "Vary the reporting verb: never the same verb twice in a row, and never "
+                        "'sagte' more than once every four lines — rotate sagte, fragte, antwortete, "
+                        "erklärte, erwiderte, rief, flüsterte, warnte, versprach, leugnete, gab zu, "
+                        "lachte, drohte, bat. When the action already shows it, you may drop the "
+                        "reporting verb and state the action."),
                 name="German")
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
@@ -184,7 +212,12 @@ LANG_CONF = {
                 accent=("Use a warm, natural spoken storyteller tone (mix だ/だった and です/ました "
                         "naturally, with softeners like でも、そして、すると). Use '、' at every "
                         "breath point and '。' to end a sentence. Never use pronouns for characters "
-                        "(彼, 彼女, 彼ら, 私, 僕, あなた); repeat the character name instead."),
+                        "(彼, 彼女, 彼ら, 私, 僕, あなた); repeat the character name instead. "
+                        "Vary the reporting verb: never the same verb twice in a row, and never "
+                        "'言った' more than once every four lines — rotate 言った, 尋ねた, 答えた, "
+                        "説明した, 返した, 叫んだ, 囁いた, 警告した, 約束した, 否定した, 認めた, "
+                        "笑った, 脅した, 頼んだ. When the action already shows it, you may drop "
+                        "the reporting verb and state the action."),
                 name="Japanese")
         ),
         "font_keys": ("notosanscjk", "notosansjp", "notosansjapanese", "takao", "ipag",
@@ -943,7 +976,9 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
                 f"with the other parts. Never use pronouns, always repeat the character name. "
                 f"For Burmese, when a name is unknown never write လူတစ်ယောက် or ကျွန်တော် — "
                 f"use a role word or leave the subject out. "
-                f"For Burmese, do not end every line with ပါတယ်; use it only when needed.)\n\n")
+                f"For Burmese, do not end every line with ပါတယ်; use it only when needed. "
+                f"For Burmese, vary the reporting verb — 'ပြောတယ်' at most once every four lines; "
+                f"prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ် and rotate.)\n\n")
         out.append({"lo": lo, "hi": hi, "text": head + note + lines})
     return out
 
