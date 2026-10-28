@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # ======================================================================
 # config
@@ -880,10 +880,27 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
 import re
 
 
+CHUNK = 50   # lines per Gemini prompt part (1hr video -> many parts, so Gemini never drops lines)
+
 
 def build_prompt(units, lang="my"):
     lines = "\n".join(f"[{i}] {u['src']}" for i, u in enumerate(units))
     return LANG_CONF[lang]["prompt"] + lines
+
+
+def build_prompt_chunks(units, lang="my", size=CHUNK):
+    """Split the prompt into parts of `size` lines. Numbers keep going ([0-49], [50-99] ...)."""
+    head = LANG_CONF[lang]["prompt"]
+    total = (len(units) + size - 1) // size
+    out = []
+    for k in range(total):
+        lo, hi = k * size, min((k + 1) * size, len(units))
+        lines = "\n".join(f"[{i}] {units[i]['src']}" for i in range(lo, hi))
+        note = (f"(PART {k + 1} of {total} of the same episode. Only lines [{lo}] to [{hi - 1}]. "
+                f"Keep the SAME numbers. Keep character names and role words consistent "
+                f"with the other parts.)\n\n")
+        out.append({"lo": lo, "hi": hi, "text": head + note + lines})
+    return out
 
 
 def parse_numbered(text, n):
@@ -898,6 +915,13 @@ def parse_numbered(text, n):
         if len(plain) == n:
             got = {i: plain[i] for i in range(n)}
     return got
+
+
+def check_part(text, lo, hi):
+    """Check one pasted part. Returns (found {num: text}, missing [num])."""
+    got = {i: t for i, t in parse_numbered(text or "", hi).items() if i >= lo}
+    missing = [i for i in range(lo, hi) if i not in got]
+    return got, missing
 
 # ======================================================================
 # tts
@@ -1334,8 +1358,12 @@ def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, la
 
 
 def write_prompt(proj, lang):
+    """prompt.txt = whole prompt; prompt_partNN.txt = 50-line parts."""
     with open(proj.prompt_file, "w", encoding="utf-8") as f:
         f.write(build_prompt(proj.units, lang))
+    for k, c in enumerate(build_prompt_chunks(proj.units, lang)):
+        with open(os.path.join(proj.path, f"prompt_part{k + 1:02d}.txt"), "w", encoding="utf-8") as f:
+            f.write(c["text"])
     return proj.prompt_file
 
 
@@ -1513,7 +1541,7 @@ def run_render(proj, s, proxy=None, hf_token=None, progress=None):
 """Command-line interface.
 
   recap init <video|url> -d work/ep1        download / copy video into a project
-  recap transcribe work/ep1 --lang my       Whisper -> units + prompt.txt
+  recap transcribe work/ep1 --lang my       Whisper -> units + prompt.txt + prompt_partNN.txt
   recap apply work/ep1 [translated.txt]     fill translations from Gemini's reply
   recap render work/ep1                     TTS + smart-sync render -> final.mp4
   recap preview work/ep1                    one PNG frame to check subtitle/neon style
@@ -1607,8 +1635,9 @@ def cmd_transcribe(args, proj=None):
     info = run_transcribe(proj, args.model, args.src_lang, not args.no_batch, args.max_min,
                           lang, prog)
     prog.done()
-    print(f"✅ {info}\n   Prompt: {proj.prompt_file}")
-    print("   → prompt.txt ကို Gemini ထဲ paste၊ ရလဒ်ကို translated.txt အဖြစ် သိမ်းပြီး `recap apply` လုပ်ပါ")
+    nparts = len(build_prompt_chunks(proj.units, lang))
+    print(f"✅ {info}\n   Prompt: {proj.prompt_file}  (+ prompt_part01..{nparts:02d}.txt · {CHUNK} ကြောင်းစီ)")
+    print("   → prompt_partNN.txt ကို တစ်ခုချင်း Gemini ထဲ paste၊ ရလဒ်အကုန်ကို translated.txt ထဲ အစဉ်လိုက်ထည့်ပြီး `recap apply` လုပ်ပါ")
     return proj
 
 
@@ -1688,8 +1717,8 @@ def cmd_run(args):
 
     src = args.translated or proj.translated_file
     if not os.path.exists(src):
-        print(f"\n📋 Prompt: {proj.prompt_file}")
-        print(f"   ① prompt.txt ကို Gemini မှာ paste  ② ရလဒ်ကို {src} မှာ သိမ်း")
+        print(f"\n📋 Prompt: {proj.prompt_file}  (အပိုင်းခွဲ: prompt_partNN.txt)")
+        print(f"   ① prompt_partNN.txt ကို Gemini မှာ တစ်ခုချင်း paste  ② ရလဒ်အကုန်ကို {src} မှာ အစဉ်လိုက် သိမ်း")
         if not sys.stdin.isatty():
             sys.exit(f"\n⏸️ translated ဖိုင်မရှိလို့ ရပ်လိုက်တယ်။ ဖြည့်ပြီးရင် `recap run ... --translated {src}` "
                      "(သို့) `recap apply` + `recap render` လုပ်ပါ")
@@ -1925,12 +1954,12 @@ def step1(url, upload, lang_name, model, src_lang, max_min, height, progress=gr.
         raise
     except Exception as ex:
         raise gr.Error(str(ex)[:600])
-    prompt_text = open(proj.prompt_file, encoding="utf-8").read()
-    return pdir, f"✅ {info}", prompt_text
+    chunks = build_prompt_chunks(proj.units, code)
+    return pdir, f"✅ {info} · Prompt {len(chunks)} ပိုင်း", chunks, {}
 
 
 # ---------------------------------------------------------------- step 2 (tts + render)
-def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
+def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_ref,
           height, fps, preset, max_speed, crop, flip, zoom,
           sub, sub_size, sub_pos, neon, sweep, progress=gr.Progress()):
     if not pdir or not os.path.isdir(pdir):
@@ -1940,7 +1969,8 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
         proj = Project.load(pdir)
         if not proj.units:
             raise RuntimeError("1️⃣ စာသားထုတ် ကို အရင်လုပ်ပါ")
-        got, missing = apply_translation(proj, translated or "", code)
+        text = "\n".join((parts or {})[k] for k in sorted(parts or {})) + "\n" + (translated or "")
+        got, missing = apply_translation(proj, text, code)
         if missing:
             raise RuntimeError(f"ဘာသာပြန် မပြည့်သေးဘူး ({got}/{len(proj.units)}) · မပါတာ: {missing[:15]}")
         s = proj.settings
@@ -1969,12 +1999,28 @@ def step2(pdir, translated, lang_name, engine, voice, rate, workers, vox_ref,
 def reset_all(pdir):
     if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
         shutil.rmtree(pdir, ignore_errors=True)
-    return "", "", "", "", "", None, None, None, "🗑️ ရှင်းပြီး"
+    # pdir_state, status_fetch, status1, chunks_state, parts_state, translated, pv_img, video, dl, status2
+    return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
+
+
+def make_setter(lo, hi):
+    """Returns a handler for one part's paste box: stores the text + shows ✅/⚠️ status."""
+    def f(text, parts):
+        parts = dict(parts or {})
+        text = text or ""
+        parts[lo] = text          # key = part's first line number
+        if not text.strip():
+            return parts, "⏳ မဖြည့်သေး"
+        got, missing = check_part(text, lo, hi)
+        if missing:
+            return parts, f"⚠️ {len(got)}/{hi - lo} · မပါတာ: {missing[:10]}"
+        return parts, f"✅ {hi - lo}/{hi - lo}"
+    return f
 
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 7`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 8`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -2037,15 +2083,31 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     gr.Markdown("### 1️⃣ စာသားထုတ်")
     b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
     status1 = gr.Markdown()
-    with gr.Accordion("📋 Gemini Prompt", open=False):
-        prompt = gr.Textbox(label="Gemini Prompt (Copy ယူပြီး Gemini မှာ paste)", lines=8,
-                            interactive=False, show_copy_button=True)
-        b_copy = gr.Button("📋 Copy Prompt")
-        b_copy.click(None, prompt, None,
-                     js="(t) => { navigator.clipboard.writeText(t); }")
 
-    gr.Markdown("### 2️⃣ ဘာသာပြန်ရလဒ်")
-    translated = gr.Textbox(label="Gemini ရလဒ် paste ([0] ... [1] ...)", lines=8)
+    chunks_state = gr.State([])
+    parts_state = gr.State({})
+
+    gr.Markdown("### 📋 Prompt အပိုင်းများ (၅၀ ကြောင်းစီ) — Copy → Gemini → ရလဒ်ကို အောက်က box မှာ paste")
+
+    @gr.render(inputs=chunks_state)
+    def show_chunks(chunks):
+        if not chunks:
+            gr.Markdown("_1️⃣ နှိပ်ပြီးရင် Prompt အပိုင်းတွေ ဒီမှာ ပေါ်မယ်_")
+            return
+        for k, c in enumerate(chunks):
+            with gr.Group():
+                gr.Markdown(f"#### Part {k + 1}/{len(chunks)} · [{c['lo']} – {c['hi'] - 1}]")
+                gr.Textbox(value=c["text"], lines=3, max_lines=5, interactive=False,
+                           show_copy_button=True, label="① Prompt (Copy ခလုတ်နှိပ်)")
+                box = gr.Textbox(label=f"② Gemini ရလဒ် Part {k + 1} ကို ဒီမှာ paste",
+                                 lines=3, max_lines=5)
+                st = gr.Markdown("⏳ မဖြည့်သေး")
+                box.change(make_setter(c["lo"], c["hi"]), [box, parts_state], [parts_state, st])
+
+    with gr.Accordion("(သို့) ရလဒ်အကုန် တစ်ခါတည်း paste", open=False):
+        translated = gr.Textbox(label="Gemini ရလဒ် ([0] ... [1] ...)", lines=8)
+
+    gr.Markdown("### 2️⃣ အသံထုတ် + Video")
     b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
     status2 = gr.Markdown()
     video = gr.Video(label="ရလဒ်")
@@ -2053,12 +2115,14 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
     b1.click(step1, [url, upload, lang, model, src_lang, max_min, height],
-             [pdir_state, status1, prompt])
-    b2.click(step2, [pdir_state, translated, lang, engine, voice, rate, workers, vox_ref, height,
-                     fps, preset, max_speed, crop, flip, zoom, sub, sub_size, sub_pos, neon, sweep],
+             [pdir_state, status1, chunks_state, parts_state])
+    b2.click(step2, [pdir_state, translated, parts_state, lang, engine, voice, rate, workers,
+                     vox_ref, height, fps, preset, max_speed, crop, flip, zoom,
+                     sub, sub_size, sub_pos, neon, sweep],
              [video, dl, status2])
     b3.click(reset_all, pdir_state,
-             [pdir_state, status_fetch, status1, prompt, translated, pv_img, video, dl, status2])
+             [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
+              pv_img, video, dl, status2])
 
 if __name__ == "__main__":
     demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
