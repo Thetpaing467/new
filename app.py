@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # ======================================================================
 # config
@@ -46,25 +46,38 @@ _STORY = (
     "NARRATION STYLE (drama-recap, third person): the source lines are raw speech-to-text of "
     "characters TALKING. Do NOT translate them as direct dialogue and do NOT use quotation marks. "
     "Retell them as a narrator who watched the scene: turn what a character says into reported "
-    "speech, for example 'Xiao Li said that ...', 'he asked her ...', 'she firmly replied that ...', "
-    "'he told them ...'. Work out who is speaking and who is being spoken to from context "
-    "(mother, father, boss, neighbour and so on) and use the relationship words and names, never "
-    "'I' or 'you' from the source. Turn first-person and second-person speech into third person. "
+    "speech, for example 'Xiao Li said that ...', 'Xiao Li asked Mother ...', "
+    "'Mother firmly replied that ...', 'Boss Wang told Xiao Li ...'. "
+    "Work out who is speaking and who is being spoken to from context "
+    "(mother, father, boss, neighbour and so on) and use the character names or relationship words. "
+    "Turn first-person and second-person speech into third person. "
     "Keep the narrator calm and clear, like someone summarising a TV drama episode to a friend. "
     "Each output line is ONE complete narrated sentence, medium length, that ends like a finished "
     "statement. Link actions with natural connectors (then, so, but, after that, at this moment). "
     "Keep insults, jokes, arguments and emotions of the original, but report them rather than act "
     "them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not in the "
     "source lines. Do NOT address the audience. "
-    "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use it and "
-    "spell it the same way every time. If the name is NOT known, never write 'he', 'she', "
-    "'the person' or 'someone'. Instead call the character by a simple role or look-based word "
-    "chosen from age and gender, and keep the same word for the same person from start to end. "
+    "NO PRONOUNS (very important): NEVER use any pronoun for a character, in any form "
+    "(subject, object or possessive). That means no he, she, him, her, his, they, them, their, "
+    "I, me, my, you, your, we, us, and no equivalent word in the target language "
+    "(Burmese: သူ, သူ့, သူမ, သူတို့, ကျွန်တော်, ကျွန်တော်တို့, ကျွန်မ, ကျွန်မတို့, ငါ, ငါတို့, "
+    "နင်, နင်တို့, မင်း, မင်းတို့, ခင်ဗျား, ရှင်, ကျွန်ုပ်; "
+    "German: er, sie, ihn, ihm, ihr, sein, ich, du, wir, ihr, mich, dich; "
+    "Japanese: 彼, 彼女, 彼ら, 私, 僕, 俺, あなた, お前, 君). "
+    "Every time a character is the subject, the object or the owner of something, write the "
+    "character's NAME again, even if the same name repeats in every sentence. "
+    "Never replace a name with a pronoun to avoid repetition. "
+    "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
+    "name for the character and spell it the same way every time. If the name is NOT known, "
+    "never use a pronoun and never write 'the person' or 'someone'. Instead call the character "
+    "by a simple role or look-based word chosen from age and gender, and keep the same word for "
+    "the same person from start to end. "
     "For Burmese use words like: ကောင်လေး (young man or boy), ကောင်မလေး (young woman or girl), "
     "ဦးကြီး (older man), အဒေါ်ကြီး (older woman), အဘိုးကြီး (very old man), အဘွားကြီး (very old woman), "
     "ကလေးလေး (small child), လူလတ်ပိုင်း (middle-aged person). "
-    "If the relationship is clear from the dialogue, prefer it (အမေ, အဖေ, သူ့အမျိုးသမီး, သူ့သူငယ်ချင်း, "
-    "သူဌေး, ဧည့်သည်). "
+    "If the relationship is clear from the dialogue, prefer it (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, "
+    "သူဌေး, ဧည့်သည်) and attach the character name before it when the name is known "
+    "(example pattern: the name + ရဲ့ + relationship word). "
     "For other languages use the equivalent natural words (German: der junge Mann, die junge Frau, "
     "der alte Mann, die ältere Frau; Japanese: 青年, 少女, 老人, おばさん). "
     "Speech-to-text often misspells names: if two similar-sounding names appear, treat them as "
@@ -101,6 +114,8 @@ LANG_CONF = {
                         "(၏၊ သည်၊ ၍). "
                         "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
                         "Transliterate spoken names into Burmese script the same way every time; "
+                        "never use pronouns such as သူ၊ သူ့၊ သူမ၊ သူတို့၊ ကျွန်တော်၊ ကျွန်မ၊ ငါ၊ နင်၊ မင်း — "
+                        "always repeat the character name instead; "
                         "when a name is unknown use ကောင်လေး / ကောင်မလေး / ဦးကြီး / အဒေါ်ကြီး "
                         "style words consistently."),
                 name="Burmese")
@@ -127,7 +142,8 @@ LANG_CONF = {
                 script="use ONLY German (Latin script), no Chinese letters.",
                 accent=("Use relaxed spoken German (contractions like 'ist's', 'gibt's' are fine, "
                         "connectors like 'und dann', 'plötzlich', 'also', 'aber') and put a comma "
-                        "at every natural breath point."),
+                        "at every natural breath point. Never use personal pronouns for characters "
+                        "(er, sie, ihn, ihm, ihr, sein, ich, du, wir); repeat the character name instead."),
                 name="German")
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
@@ -156,7 +172,8 @@ LANG_CONF = {
                        "letters except kanji.",
                 accent=("Use a warm, natural spoken storyteller tone (mix だ/だった and です/ました "
                         "naturally, with softeners like でも、そして、すると). Use '、' at every "
-                        "breath point and '。' to end a sentence."),
+                        "breath point and '。' to end a sentence. Never use pronouns for characters "
+                        "(彼, 彼女, 彼ら, 私, 僕, あなた); repeat the character name instead."),
                 name="Japanese")
         ),
         "font_keys": ("notosanscjk", "notosansjp", "notosansjapanese", "takao", "ipag",
@@ -898,7 +915,7 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
         lines = "\n".join(f"[{i}] {units[i]['src']}" for i in range(lo, hi))
         note = (f"(PART {k + 1} of {total} of the same episode. Only lines [{lo}] to [{hi - 1}]. "
                 f"Keep the SAME numbers. Keep character names and role words consistent "
-                f"with the other parts.)\n\n")
+                f"with the other parts. Never use pronouns, always repeat the character name.)\n\n")
         out.append({"lo": lo, "hi": hi, "text": head + note + lines})
     return out
 
@@ -2020,7 +2037,7 @@ def make_setter(lo, hi):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 8`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 9`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -2032,6 +2049,7 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     model = gr.State("base")
     src_lang = gr.State("auto")
     max_min = gr.State(0)       # 0 = unlimited
+    translated = gr.State("")   # "ရလဒ်အကုန် တစ်ခါတည်း paste" box ကို ဖျောက်ထားတယ် (step2 အတွက် အလွတ်ပဲ ပို့မယ်)
 
     with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
         lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
@@ -2087,25 +2105,24 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     chunks_state = gr.State([])
     parts_state = gr.State({})
 
-    gr.Markdown("### 📋 Prompt အပိုင်းများ (၅၀ ကြောင်းစီ) — Copy → Gemini → ရလဒ်ကို အောက်က box မှာ paste")
+    # ">" မြှားလေးနဲ့ ခေါက်/ဖွင့် လုပ်လို့ရတဲ့ Prompt အပိုင်းများ
+    with gr.Accordion("📋 Prompt အပိုင်းများ (၅၀ ကြောင်းစီ) — Copy → Gemini → ရလဒ်ကို အောက်က box မှာ paste",
+                      open=False):
 
-    @gr.render(inputs=chunks_state)
-    def show_chunks(chunks):
-        if not chunks:
-            gr.Markdown("_1️⃣ နှိပ်ပြီးရင် Prompt အပိုင်းတွေ ဒီမှာ ပေါ်မယ်_")
-            return
-        for k, c in enumerate(chunks):
-            with gr.Group():
-                gr.Markdown(f"#### Part {k + 1}/{len(chunks)} · [{c['lo']} – {c['hi'] - 1}]")
-                gr.Textbox(value=c["text"], lines=3, max_lines=5, interactive=False,
-                           show_copy_button=True, label="① Prompt (Copy ခလုတ်နှိပ်)")
-                box = gr.Textbox(label=f"② Gemini ရလဒ် Part {k + 1} ကို ဒီမှာ paste",
-                                 lines=3, max_lines=5)
-                st = gr.Markdown("⏳ မဖြည့်သေး")
-                box.change(make_setter(c["lo"], c["hi"]), [box, parts_state], [parts_state, st])
-
-    with gr.Accordion("(သို့) ရလဒ်အကုန် တစ်ခါတည်း paste", open=False):
-        translated = gr.Textbox(label="Gemini ရလဒ် ([0] ... [1] ...)", lines=8)
+        @gr.render(inputs=chunks_state)
+        def show_chunks(chunks):
+            if not chunks:
+                gr.Markdown("_1️⃣ နှိပ်ပြီးရင် Prompt အပိုင်းတွေ ဒီမှာ ပေါ်မယ်_")
+                return
+            for k, c in enumerate(chunks):
+                with gr.Accordion(f"Part {k + 1}/{len(chunks)} · [{c['lo']} – {c['hi'] - 1}]",
+                                  open=False):
+                    gr.Textbox(value=c["text"], lines=3, max_lines=5, interactive=False,
+                               show_copy_button=True, label="① Prompt (Copy ခလုတ်နှိပ်)")
+                    box = gr.Textbox(label=f"② Gemini ရလဒ် Part {k + 1} ကို ဒီမှာ paste",
+                                     lines=3, max_lines=5)
+                    st = gr.Markdown("⏳ မဖြည့်သေး")
+                    box.change(make_setter(c["lo"], c["hi"]), [box, parts_state], [parts_state, st])
 
     gr.Markdown("### 2️⃣ အသံထုတ် + Video")
     b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
