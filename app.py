@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # ======================================================================
 # config
@@ -40,9 +40,40 @@ _HUMAN = (
     "Do NOT use ellipsis (...), emoji, brackets, asterisks or stage directions. "
 )
 
+# Third-person drama-recap style (dialogue is retold as reported speech).
+# NOTE: no curly braces in this string (it is passed through str.format).
+_STORY = (
+    "NARRATION STYLE (drama-recap, third person): the source lines are raw speech-to-text of "
+    "characters TALKING. Do NOT translate them as direct dialogue and do NOT use quotation marks. "
+    "Retell them as a narrator who watched the scene: turn what a character says into reported "
+    "speech, for example 'Xiao Li said that ...', 'he asked her ...', 'she firmly replied that ...', "
+    "'he told them ...'. Work out who is speaking and who is being spoken to from context "
+    "(mother, father, boss, neighbour and so on) and use the relationship words and names, never "
+    "'I' or 'you' from the source. Turn first-person and second-person speech into third person. "
+    "Keep the narrator calm and clear, like someone summarising a TV drama episode to a friend. "
+    "Each output line is ONE complete narrated sentence, medium length, that ends like a finished "
+    "statement. Link actions with natural connectors (then, so, but, after that, at this moment). "
+    "Keep insults, jokes, arguments and emotions of the original, but report them rather than act "
+    "them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not in the "
+    "source lines. Do NOT address the audience. "
+    "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use it and "
+    "spell it the same way every time. If the name is NOT known, never write 'he', 'she', "
+    "'the person' or 'someone'. Instead call the character by a simple role or look-based word "
+    "chosen from age and gender, and keep the same word for the same person from start to end. "
+    "For Burmese use words like: ကောင်လေး (young man or boy), ကောင်မလေး (young woman or girl), "
+    "ဦးကြီး (older man), အဒေါ်ကြီး (older woman), အဘိုးကြီး (very old man), အဘွားကြီး (very old woman), "
+    "ကလေးလေး (small child), လူလတ်ပိုင်း (middle-aged person). "
+    "If the relationship is clear from the dialogue, prefer it (အမေ, အဖေ, သူ့အမျိုးသမီး, သူ့သူငယ်ချင်း, "
+    "သူဌေး, ဧည့်သည်). "
+    "For other languages use the equivalent natural words (German: der junge Mann, die junge Frau, "
+    "der alte Mann, die ältere Frau; Japanese: 青年, 少女, 老人, おばさん). "
+    "Speech-to-text often misspells names: if two similar-sounding names appear, treat them as "
+    "the same person and use one spelling throughout. "
+)
+
 _PROMPT_TAIL = (
     "Rules: do NOT summarize, shorten or skip; do NOT move content between lines; "
-    "keep character names consistent across all lines; {script} " + _HUMAN +
+    "keep character names consistent across all lines; {script} " + _HUMAN + _STORY +
     "Output exactly one line per input line in the format [number] {name} text "
     "-- same numbers, no extra comments.\n\n"
 )
@@ -62,10 +93,16 @@ LANG_CONF = {
             "below into natural spoken Burmese narration (storyteller style). "
             + _PROMPT_TAIL.format(
                 script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
-                accent=("Use spoken Burmese endings (တယ်၊ ပါတယ်၊ တော့၊ ပေါ့၊ လေ၊ ပဲ) instead of literary "
-                        "endings (၏၊ သည်၊ ၍၊ သော်လည်း). Use '၊' for every small breath pause "
-                        "(roughly every 6-12 syllables) and '။' to end a sentence. "
-                        "Keep each phrase short enough to say in one breath."),
+                accent=("Every line must end with a polite spoken ending such as ပါတယ်။ (also: "
+                        "ပါတော့တယ်၊ လိုက်ပါတယ်၊ ပြောပါတယ်၊ မေးလိုက်ပါတယ်၊ ဖြေပါတယ်). "
+                        "Report speech with patterns like '... လို့ ပြောပါတယ်', "
+                        "'... လို့ မေးလိုက်ရာ ...', '... ဆိုပြီး ...', '... လို့ ပြန်ထောက်ပြပါတယ်'. "
+                        "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
+                        "(၏၊ သည်၊ ၍). "
+                        "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
+                        "Transliterate spoken names into Burmese script the same way every time; "
+                        "when a name is unknown use ကောင်လေး / ကောင်မလေး / ဦးကြီး / အဒေါ်ကြီး "
+                        "style words consistently."),
                 name="Burmese")
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
@@ -1937,7 +1974,7 @@ def reset_all(pdir):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 6`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 7`\nWhisper → Gemini → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
