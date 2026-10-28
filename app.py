@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 # ======================================================================
 # config
@@ -12,6 +12,9 @@ from dataclasses import dataclass, asdict, fields
 
 # Whisper segment merge targets (seconds)
 TARGET, MAXD = 4.2, 5.6
+
+# Subtitle box always has this many text lines (fixed size, never grows/shrinks)
+SUB_LINES = 2
 
 # Trim leading/trailing silence from each TTS clip, then pad 0.2s
 TRIM = (
@@ -60,7 +63,7 @@ _STORY = (
     "NO PRONOUNS (very important): NEVER use any pronoun for a character, in any form "
     "(subject, object or possessive). That means no he, she, him, her, his, they, them, their, "
     "I, me, my, you, your, we, us, and no equivalent word in the target language "
-    "(Burmese: သူ, သူ့, သူမ, သူတို့, ကျွန်တော်တို့, ကျွန်မ, ကျွန်မတို့, ငါ, ငါတို့, "
+    "(Burmese: သူ, သူ့, သူမ, သူတို့, ကျွန်တော်, ကျွန်တော်တို့, ကျွန်မ, ကျွန်မတို့, ငါ, ငါတို့, "
     "နင်, နင်တို့, မင်း, မင်းတို့, ခင်ဗျား, ရှင်, ကျွန်ုပ်; "
     "German: er, sie, ihn, ihm, ihr, sein, ich, du, wir, ihr, mich, dich; "
     "Japanese: 彼, 彼女, 彼ら, 私, 僕, 俺, あなた, お前, 君). "
@@ -69,14 +72,14 @@ _STORY = (
     "Never replace a name with a pronoun to avoid repetition. "
     "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
     "name for the character and spell it the same way every time. If the name is NOT known, "
-    "never use any other pronoun and never write 'the person', 'a person' or 'someone'. "
+    "never use any pronoun and never write 'the person', 'a person' or 'someone'. "
     "BURMESE UNNAMED CHARACTER (very important): NEVER write လူတစ်ယောက် (a person), "
-    "လူတစ်ဦး or တစ်ယောက် for a character. Whenever the character's name is not known, "
-    "write ကျွန်တော် in that place instead (for example: ကျွန်တော်က ... လို့ ပြောပါတယ်), "
-    "and keep ကျွန်တော် for that same character from start to end. "
-    "If the relationship is clear from the dialogue, prefer it (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, "
-    "သူဌေး, ဧည့်သည်) and attach the character name before it when the name is known "
-    "(example pattern: the name + ရဲ့ + relationship word). "
+    "လူတစ်ဦး or တစ်ယောက် for a character, and NEVER write ကျွန်တော် or any other pronoun "
+    "in its place. Whenever the character's name is not known, use the relationship word if "
+    "the dialogue makes it clear (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, သူဌေး, ဧည့်သည်) and attach the "
+    "character name before it when the name is known (example pattern: the name + ရဲ့ + "
+    "relationship word); if nothing is clear, simply leave the subject out of the sentence "
+    "(Burmese does not need a subject word) and write only the action or the speech. "
     "If a second unnamed character appears in the same scene, use a role word for that second "
     "character (ကောင်မလေး young woman or girl, ဦးကြီး older man, အဒေါ်ကြီး older woman, "
     "ကလေးလေး small child) so the two characters are never mixed up. "
@@ -110,18 +113,22 @@ LANG_CONF = {
             "below into natural spoken Burmese narration (storyteller style). "
             + _PROMPT_TAIL.format(
                 script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
-                accent=("Every line must end with a polite spoken ending such as ပါတယ်။ (also: "
-                        "ပါတော့တယ်၊ လိုက်ပါတယ်၊ ပြောပါတယ်၊ မေးလိုက်ပါတယ်၊ ဖြေပါတယ်). "
-                        "Report speech with patterns like '... လို့ ပြောပါတယ်', "
-                        "'... လို့ မေးလိုက်ရာ ...', '... ဆိုပြီး ...', '... လို့ ပြန်ထောက်ပြပါတယ်'. "
+                accent=("ENDINGS (very important): do NOT end every line with ပါတယ်။. Use the polite "
+                        "ပါတယ် ONLY when it is really needed (a respectful request, a formal "
+                        "statement, or a very polite speaker), at most about one line in five, and "
+                        "never in two lines in a row. Normally end lines with plain spoken endings "
+                        "such as တယ်။ (ပြောတယ်၊ မေးတယ်၊ ဖြေတယ်၊ ပြန်ပြောတယ်), ခဲ့တယ်။, လိုက်တယ်။, "
+                        "နေတယ်။, တော့တယ်။, ပြီ။, လေ။, ပေါ့။, and vary the ending from line to line. "
+                        "Report speech with patterns like '... လို့ ပြောတယ်', "
+                        "'... လို့ မေးလိုက်တော့ ...', '... ဆိုပြီး ...', '... လို့ ပြန်ထောက်ပြတယ်'. "
                         "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
                         "(၏၊ သည်၊ ၍). "
                         "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
                         "Transliterate spoken names into Burmese script the same way every time; "
-                        "never use pronouns such as သူ၊ သူ့၊ သူမ၊ သူတို့၊ ကျွန်မ၊ ငါ၊ နင်၊ မင်း — "
+                        "never use pronouns such as သူ၊ သူ့၊ သူမ၊ သူတို့၊ ကျွန်တော်၊ ကျွန်မ၊ ငါ၊ နင်၊ မင်း — "
                         "always repeat the character name instead; "
-                        "when a name is unknown NEVER write လူတစ်ယောက် — write ကျွန်တော် "
-                        "instead, consistently for the same character."),
+                        "when a name is unknown NEVER write လူတစ်ယောက် and NEVER write ကျွန်တော် — "
+                        "use the relationship / role word, or leave the subject out."),
                 name="Burmese")
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
@@ -287,13 +294,8 @@ def fmt_t(sec):
     return f"{sec:.1f}s" if sec < 60 else f"{int(sec // 60)}m {sec % 60:.0f}s"
 
 
-# "a person" (လူတစ်ယောက်) -> ကျွန်တော်  (Burmese only; safety net in case Gemini still writes it)
-_MM_PERSON = re.compile(r"လူတစ်ယောက်|လူတစ်ဦး|လူတယောက်")
-
-
 def clean_text(text, lang="my"):
-    if lang == "my":
-        text = _MM_PERSON.sub("ကျွန်တော်", text)
+    # keep only characters of the target language (no pronoun substitution any more)
     return re.sub(LANG_CONF[lang]["clean"], "", text).strip()
 
 
@@ -545,26 +547,39 @@ SWEEP_BAND = np.array([255, 255, 235], np.float32)
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 255),
                   layout="raqm", is_mm=True):
-    font = get_font(font_path, fs, layout)
+    """Subtitle box with a FIXED size: always SUB_LINES lines tall, full width.
+    The text is centred inside it. If a text needs more lines than the box has, the text
+    (not the box) is made slightly smaller until it fits."""
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     ink_img = Image.new("L", (W, H), 0)       # text-only mask (used by the music sweep)
     di = ImageDraw.Draw(ink_img)
 
     pad_x, pad_y = int(fs * 0.6), int(fs * 0.5)
-    lines = wrap_text(text, font, W - 2 * pad_x, is_mm)
-    if not lines:
-        return None
-    lh = int(fs * 1.4)
-    box_h = len(lines) * lh + 2 * pad_y
+    lh_box = int(fs * 1.4)
+    box_h = SUB_LINES * lh_box + 2 * pad_y     # fixed - does not depend on the text
+    box_h = min(box_h, H)
     max_y = max(0, H - box_h)
     box_y = max(0, min(int(pos_y / 100 * max_y), max_y))
+
+    # fit the text into SUB_LINES lines (shrink the text only if really necessary)
+    cur_fs = fs
+    font = get_font(font_path, cur_fs, layout)
+    lines = wrap_text(text, font, W - 2 * pad_x, is_mm)
+    while len(lines) > SUB_LINES and cur_fs > 12:
+        cur_fs = max(12, int(cur_fs * 0.92))
+        font = get_font(font_path, cur_fs, layout)
+        lines = wrap_text(text, font, W - 2 * pad_x, is_mm)
+    if not lines:
+        return None
 
     d.rounded_rectangle([0, box_y, W, box_y + box_h], radius=int(fs * 0.66),
                         fill=(0, 0, 0, alpha))
     ink = (int(color[0]), int(color[1]), int(color[2]), 255)
-    sw = max(1, round(fs / 15))
-    ty = box_y + pad_y
+    sw = max(1, round(cur_fs / 15))
+    lh = int(cur_fs * 1.4)
+    block_h = len(lines) * lh
+    ty = box_y + (box_h - block_h) // 2        # vertically centred in the fixed box
     for ln in lines:
         lx = (W - font.getlength(ln)) / 2
         d.text((lx, ty), ln, font=font, fill=(0, 0, 0, 255),
@@ -926,7 +941,9 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
         note = (f"(PART {k + 1} of {total} of the same episode. Only lines [{lo}] to [{hi - 1}]. "
                 f"Keep the SAME numbers. Keep character names and role words consistent "
                 f"with the other parts. Never use pronouns, always repeat the character name. "
-                f"For Burmese, when a name is unknown write ကျွန်တော် instead of လူတစ်ယောက်.)\n\n")
+                f"For Burmese, when a name is unknown never write လူတစ်ယောက် or ကျွန်တော် — "
+                f"use a role word or leave the subject out. "
+                f"For Burmese, do not end every line with ပါတယ်; use it only when needed.)\n\n")
         out.append({"lo": lo, "hi": hi, "text": head + note + lines})
     return out
 
@@ -2096,7 +2113,7 @@ def make_setter(lo, hi):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 10`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 11`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
