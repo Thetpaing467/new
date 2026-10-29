@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 # ======================================================================
 # config
@@ -30,8 +30,6 @@ VOX_SPACES = [
 VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".flv")
 
 # Human-like narration rules (added to every language prompt).
-# NOTE: the cleaner removes "…" and emoji, so we only ask for the language's own
-# comma / full-stop marks. Edge TTS and VoxCPM take their breathing pauses from those marks.
 _HUMAN = (
     "VOICE STYLE (very important): the result will be read aloud by a speech engine, so it must "
     "sound like a real human storyteller talking to a friend, NOT a robot reading text. "
@@ -44,7 +42,6 @@ _HUMAN = (
 )
 
 # Third-person drama-recap style (dialogue is retold as reported speech).
-# NOTE: no curly braces in this string (it is passed through str.format).
 _STORY = (
     "NARRATION STYLE (drama-recap, third person): the source lines are raw speech-to-text of "
     "characters TALKING. Do NOT translate them as direct dialogue and do NOT use quotation marks. "
@@ -414,8 +411,6 @@ def find_font(lang="my", explicit=""):
     """Order: --font path -> RECAP_FONT env -> repo fonts/ -> system fonts."""
     conf = LANG_CONF[lang]
 
-    # --font ကို ဘာသာစကားအားလုံးအတွက် သုံးမယ်၊ RECAP_FONT (env) ကို မြန်မာအတွက်ပဲ သုံးမယ်
-    # (မြန်မာ font နဲ့ ဂျပန်/ဂျာမန်ရေးရင် □□□ ပေါ်လို့)
     if explicit and os.path.exists(explicit):
         return explicit
     env_font = os.environ.get("RECAP_FONT", "")
@@ -431,7 +426,7 @@ def find_font(lang="my", explicit=""):
         for f in repo:
             if any(k in os.path.basename(f).lower() for k in conf["font_keys"]):
                 return f
-        if repo:                      # your own uploaded font (any file name) wins over system fonts
+        if repo:
             return sorted(repo)[0]
     else:
         for key in conf["font_keys"]:
@@ -502,7 +497,6 @@ def split_syll(word):
 
 def wrap_text(text, font, maxw, is_mm=False):
     lines, cur = [], ""
-    # CJK without spaces: wrap per character
     if not is_mm and " " not in text and any(0x3040 <= ord(c) <= 0x9FFF for c in text):
         for ch in text:
             if not cur or font.getlength(cur + ch) <= maxw:
@@ -572,30 +566,24 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 
-# Music-sweep colours (BGR): trail tints the text cyan as the line is "played",
-# the moving band is a bright white-cyan highlight.
 SWEEP_TRAIL = np.array([255, 235, 60], np.float32)
 SWEEP_BAND = np.array([255, 255, 235], np.float32)
 
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 255),
                   layout="raqm", is_mm=True):
-    """Subtitle box with a FIXED size: always SUB_LINES lines tall, full width.
-    The text is centred inside it. If a text needs more lines than the box has, the text
-    (not the box) is made slightly smaller until it fits."""
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    ink_img = Image.new("L", (W, H), 0)       # text-only mask (used by the music sweep)
+    ink_img = Image.new("L", (W, H), 0)
     di = ImageDraw.Draw(ink_img)
 
     pad_x, pad_y = int(fs * 0.6), int(fs * 0.5)
     lh_box = int(fs * 1.4)
-    box_h = SUB_LINES * lh_box + 2 * pad_y     # fixed - does not depend on the text
+    box_h = SUB_LINES * lh_box + 2 * pad_y
     box_h = min(box_h, H)
     max_y = max(0, H - box_h)
     box_y = max(0, min(int(pos_y / 100 * max_y), max_y))
 
-    # fit the text into SUB_LINES lines (shrink the text only if really necessary)
     cur_fs = fs
     font = get_font(font_path, cur_fs, layout)
     lines = wrap_text(text, font, W - 2 * pad_x, is_mm)
@@ -612,7 +600,7 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     sw = max(1, round(cur_fs / 15))
     lh = int(cur_fs * 1.4)
     block_h = len(lines) * lh
-    ty = box_y + (box_h - block_h) // 2        # vertically centred in the fixed box
+    ty = box_y + (box_h - block_h) // 2
     for ln in lines:
         lx = (W - font.getlength(ln)) / 2
         d.text((lx, ty), ln, font=font, fill=(0, 0, 0, 255),
@@ -635,32 +623,28 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
 
 
 def blend_overlay(fr, ov, p=None):
-    """Blend the subtitle onto the frame.
-    p = None -> plain subtitle. p in 0..1 -> music sweep: a bright band glides left->right
-    across the line while the text behind it turns cyan (like a karaoke / equalizer sweep)."""
     reg = fr[ov["y0"]:ov["y1"]].astype(np.float32) * ov["inv"] + ov["pre"]
     if p is not None:
         W = reg.shape[1]
         p = max(0.0, min(float(p), 1.0))
-        c = (-0.12 + 1.24 * p) * W            # band centre (starts / ends just outside the frame)
-        bw = 0.07 * W                          # band half-width
+        c = (-0.12 + 1.24 * p) * W
+        bw = 0.07 * W
         x = ov["xs"]
-        band = np.exp(-(((x - c) / bw) ** 2))                      # (1, W, 1)
-        trail = (x < c).astype(np.float32) * 0.55                  # played part
+        band = np.exp(-(((x - c) / bw) ** 2))
+        trail = (x < c).astype(np.float32) * 0.55
         tm = ov["tm"]
         k_trail = np.clip(trail, 0.0, 1.0) * tm
         reg = reg * (1.0 - k_trail) + SWEEP_TRAIL * k_trail
         k_band = np.clip(band * 0.95, 0.0, 1.0) * tm
         reg = reg * (1.0 - k_band) + SWEEP_BAND * k_band
-        reg += band * (1.0 - ov["inv"]) * 22.0                     # soft glow on the black box
+        reg += band * (1.0 - ov["inv"]) * 22.0
     fr[ov["y0"]:ov["y1"]] = np.clip(reg, 0, 255).astype(np.uint8)
 
 
 class Neon:
-    """Animated two-colour neon border that follows the frame's aspect ratio."""
     BASE = np.array([12, 8, 10], np.float32)
-    CYAN = np.array([255, 255, 0], np.float32)       # BGR
-    MAGENTA = np.array([110, 30, 255], np.float32)   # BGR
+    CYAN = np.array([255, 255, 0], np.float32)
+    MAGENTA = np.array([110, 30, 255], np.float32)
     IDLE = 0.14
     NBINS = 2048
 
@@ -710,7 +694,6 @@ def zoom_flip(fr, zoom, flip):
 # ======================================================================
 # download
 # ======================================================================
-"""Get a video from a URL (direct / Google Drive / Dropbox / yt-dlp sites) or a local file."""
 import glob
 import hashlib
 import os
@@ -791,7 +774,6 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
 
 
 def ensure_mp4(raw, final, height):
-    """Copy-remux if already H.264, otherwise re-encode (scaled down to `height`)."""
     try:
         codec = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
                     "-show_entries", "stream=codec_name", "-of", "csv=p=0", raw]).strip()
@@ -812,7 +794,6 @@ def ensure_mp4(raw, final, height):
 
 
 def fetch_video(source, final, height=720, progress=None, cookies_file=None):
-    """`source` is a local path or http(s) URL. Result is an MP4 written to `final`."""
     source = source.strip()
 
     if not re.match(r"^https?://", source, re.I):
@@ -864,7 +845,6 @@ def source_key(source):
 # ======================================================================
 # transcribe
 # ======================================================================
-"""Speech -> timed text with faster-whisper."""
 import os
 import wave
 
@@ -919,8 +899,6 @@ def merge_segments(raw):
 
 def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=True,
                      max_min=0, progress=None):
-    """Returns (units, vdur, info_text). Each unit = {start, end, src, my}.
-    max_min = 0 (or None) means unlimited length."""
     progress = progress or (lambda f, l=None: None)
     vdur = probe_duration(video)
     if max_min and vdur > max_min * 60:
@@ -929,7 +907,10 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
 
     progress(0.0, "Audio ထုတ်နေတယ်")
     wav = os.path.join(workdir, "audio16k.wav")
-    sh(["ffmpeg", "-y", "-i", video, "-vn", "-ac", "1", "-ar", "16000", wav])
+    # Error ဖြစ်နေတဲ့ အသံကို ဖျက်ပြီး (Discard) အသစ်ပြန် Encode လုပ်တဲ့ အတွက်
+    # -err_detect ignore_err နဲ့ -fflags +discardcorrupt ကို ထည့်ထားပါတယ်
+    sh(["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
+        "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
     with wave.open(wav) as wf:
         audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -951,11 +932,10 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
 # ======================================================================
 # translate
 # ======================================================================
-"""Manual translation helpers (build the Gemini prompt, parse the numbered reply)."""
 import re
 
 
-CHUNK = 50   # lines per Gemini prompt part (1hr video -> many parts, so Gemini never drops lines)
+CHUNK = 50   # lines per Gemini prompt part
 
 
 def build_prompt(units, lang="my"):
@@ -964,7 +944,6 @@ def build_prompt(units, lang="my"):
 
 
 def build_prompt_chunks(units, lang="my", size=CHUNK):
-    """Split the prompt into parts of `size` lines. Numbers keep going ([0-49], [50-99] ...)."""
     head = LANG_CONF[lang]["prompt"]
     total = (len(units) + size - 1) // size
     out = []
@@ -998,7 +977,6 @@ def parse_numbered(text, n):
 
 
 def check_part(text, lo, hi):
-    """Check one pasted part. Returns (found {num: text}, missing [num])."""
     got = {i: t for i, t in parse_numbered(text or "", hi).items() if i >= lo}
     missing = [i for i in range(lo, hi) if i not in got]
     return got, missing
@@ -1006,7 +984,6 @@ def check_part(text, lo, hi):
 # ======================================================================
 # tts
 # ======================================================================
-"""Text-to-speech engines: Edge TTS and VoxCPM (Hugging Face Spaces)."""
 import asyncio
 import shutil
 import threading
@@ -1095,7 +1072,6 @@ class VoxEngine:
 # ======================================================================
 # render
 # ======================================================================
-"""Smart-sync video render: speed-adjusted frames + subtitles + neon border -> ffmpeg."""
 import os
 import queue
 import re
@@ -1107,7 +1083,6 @@ import cv2
 
 
 def detect_crop(src):
-    """Use ffmpeg cropdetect to find black bars. Returns (w, h, x, y) or None."""
     r = subprocess.run(
         ["ffmpeg", "-ss", "1", "-i", src, "-t", "8", "-vf", "cropdetect=24:2:0",
          "-f", "null", "-"], capture_output=True, text=True)
@@ -1118,7 +1093,6 @@ def detect_crop(src):
 
 
 def prepare_video(src, dst, target_h, crop=True):
-    """Remove letterbox bars (optional) and scale to target height. Returns (W, H)."""
     target_h = int(target_h) // 2 * 2
     vf = None
     if crop:
@@ -1145,7 +1119,6 @@ def prepare_video(src, dst, target_h, crop=True):
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
-    """plan: list of (out_start, out_dur, src_start, speed). subs: [(t0, t1, text)]."""
     tmp_vid = out + "_prep.mp4"
     W, H = prepare_video(src, tmp_vid, s.height, s.crop)
 
@@ -1277,7 +1250,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
 
 
 def _preview_base_frame(src, base_png, height, crop):
-    """Prepared (cropped+scaled) first frame. Cached on disk so slider changes are instant."""
     if os.path.exists(base_png):
         fr = cv2.imread(base_png)
         if fr is not None:
@@ -1309,8 +1281,6 @@ def _preview_base_frame(src, base_png, height, crop):
 
 
 def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
-    """One frame (subtitle + sweep + neon + zoom/flip) -> PNG.
-    The expensive ffmpeg step runs only once per (video, height, crop); sliders reuse it."""
     base_png = os.path.join(os.path.dirname(os.path.abspath(out_png)),
                             f"pv_base_{os.path.getsize(src)}_{int(s.height)}_{int(bool(s.crop))}.png")
     base = _preview_base_frame(src, base_png, s.height, s.crop)
@@ -1322,14 +1292,13 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
         if ov:
-            blend_overlay(fr, ov, 0.5 if s.sub_sweep else None)   # sweep frozen at the middle
+            blend_overlay(fr, ov, 0.5 if s.sub_sweep else None)
     cv2.imwrite(out_png, fr)
     return out_png
 
 # ======================================================================
 # project
 # ======================================================================
-"""A project = one folder holding the video, units JSON, audio cache and final.mp4."""
 import json
 import os
 
@@ -1372,7 +1341,7 @@ class Project:
     def create(cls, path):
         os.makedirs(os.path.abspath(path), exist_ok=True)
         if os.path.exists(os.path.join(os.path.abspath(path), cls.FILE)):
-            return cls.load(path)   # keep existing units / settings
+            return cls.load(path)
         p = cls(path)
         p.save()
         return p
@@ -1399,7 +1368,6 @@ class Project:
 # ======================================================================
 # pipeline
 # ======================================================================
-"""High-level steps: init / transcribe / apply translation / dub + render."""
 import hashlib
 import os
 import time
@@ -1407,7 +1375,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 
-# ---------------------------------------------------------------- init
 def init_project(path, source, height=720, cookies_file=None, progress=None):
     proj = Project.create(path)
     if os.path.exists(proj.video) and proj.data.get("source") == source:
@@ -1419,7 +1386,6 @@ def init_project(path, source, height=720, cookies_file=None, progress=None):
     return proj
 
 
-# ---------------------------------------------------------------- transcribe
 def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, lang="my",
                    progress=None):
     t0 = time.time()
@@ -1438,7 +1404,6 @@ def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, la
 
 
 def write_prompt(proj, lang):
-    """prompt.txt = whole prompt; prompt_partNN.txt = 50-line parts."""
     with open(proj.prompt_file, "w", encoding="utf-8") as f:
         f.write(build_prompt(proj.units, lang))
     for k, c in enumerate(build_prompt_chunks(proj.units, lang)):
@@ -1447,7 +1412,6 @@ def write_prompt(proj, lang):
     return proj.prompt_file
 
 
-# ---------------------------------------------------------------- apply translation
 def apply_translation(proj, text, lang):
     units = proj.units
     got = parse_numbered(text, len(units))
@@ -1458,7 +1422,6 @@ def apply_translation(proj, text, lang):
     return len(got), missing
 
 
-# ---------------------------------------------------------------- dub + render
 def _synthesize(proj, my_list, s, progress, proxy, hf_token):
     wd = proj.path
     n = len(my_list)
@@ -1618,15 +1581,6 @@ def run_render(proj, s, proxy=None, hf_token=None, progress=None):
 # ======================================================================
 # cli
 # ======================================================================
-"""Command-line interface.
-
-  recap init <video|url> -d work/ep1        download / copy video into a project
-  recap transcribe work/ep1 --lang my       Whisper -> units + prompt.txt + prompt_partNN.txt
-  recap apply work/ep1 [translated.txt]     fill translations from Gemini's reply
-  recap render work/ep1                     TTS + smart-sync render -> final.mp4
-  recap preview work/ep1                    one PNG frame to check subtitle/neon style
-  recap run <video|url> -d work/ep1         whole flow, pauses once for the translation
-"""
 import argparse
 import os
 import shutil
@@ -1699,7 +1653,6 @@ def _cookies(args):
     return getattr(args, "cookies", None) or os.environ.get("YT_COOKIES") or None
 
 
-# -------------------------------------------------------------- commands
 def cmd_init(args):
     prog = Progress()
     proj = init_project(args.dir, args.source, args.height, _cookies(args), prog)
@@ -1914,14 +1867,12 @@ def _source(url, upload):
 
 
 def _pbar(frac, width=20):
-    """Text progress bar for Markdown status boxes."""
     frac = max(0.0, min(float(frac), 1.0))
     fill = int(width * frac)
     return "█" * fill + "░" * (width - fill)
 
 
 def _ensure_video(url, upload, height, cb):
-    """Download/copy the video once (same source -> same folder -> reused)."""
     source = _source(url, upload)
     if not source:
         raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
@@ -2148,7 +2099,7 @@ def make_setter(lo, hi):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 11`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 12`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
