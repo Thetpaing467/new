@@ -2112,19 +2112,6 @@ def poll_step1(jid):
 
 
 # ---------------------------------------------------------------- step 2 (tts + render)
-def _make_thumb(video_path, thumb_path):
-    """Extract a still frame so the result shows a picture without having to press play."""
-    for ss in ("1", "0"):
-        try:
-            sh(["ffmpeg", "-y", "-ss", ss, "-i", video_path, "-frames:v", "1",
-                "-q:v", "3", thumb_path])
-            if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 100:
-                return thumb_path
-        except Exception:
-            continue
-    return None
-
-
 def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_ref,
           height, fps, preset, max_speed, crop, flip, zoom,
           sub, sub_size, sub_pos, neon, sweep, progress=gr.Progress()):
@@ -2158,7 +2145,7 @@ def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_
         raise gr.Error(str(ex)[:600])
 
     # old results out; unique file name so the browser never shows a stale/blank cached video
-    for old in glob.glob(os.path.join(pdir, "final_*.mp4")) + glob.glob(os.path.join(pdir, "final_*.jpg")):
+    for old in glob.glob(os.path.join(pdir, "final_*.mp4")):
         try:
             os.remove(old)
         except OSError:
@@ -2166,17 +2153,16 @@ def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_
     stamp = int(time.time())
     out = os.path.join(pdir, f"final_{code}_{stamp}.mp4")
     shutil.copy(res["final"], out)
-    thumb = _make_thumb(out, os.path.join(pdir, f"final_{code}_{stamp}.jpg"))
     mb = os.path.getsize(out) / 1e6
-    return (out, out, thumb,
+    return (out, out,
             f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB")
 
 
 def reset_all(pdir):
     if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
         shutil.rmtree(pdir, ignore_errors=True)
-    # pdir_state, status_fetch, status1, chunks_state, parts_state, translated, pv_img, video, dl, thumb, status2
-    return "", "", "", [], {}, "", None, None, None, None, "🗑️ ရှင်းပြီး"
+    # pdir_state, status_fetch, status1, chunks_state, parts_state, translated, pv_img, video, dl, status2
+    return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
 
 
 def make_setter(lo, hi):
@@ -2293,7 +2279,6 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     status2 = gr.Markdown()
     # autoplay=True -> result shows/plays right away (no need to tap to make it appear)
     video = gr.Video(label="ရလဒ်", autoplay=True)
-    thumb_img = gr.Image(label="ရလဒ် Thumbnail", type="filepath", interactive=False)
     dl = gr.File(label="⬇️ Download MP4")
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
@@ -2307,10 +2292,10 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     b2.click(step2, [pdir_state, translated, parts_state, lang, engine, voice, rate, workers,
                      vox_ref, height, fps, preset, max_speed, crop, flip, zoom,
                      sub, sub_size, sub_pos, neon, sweep],
-             [video, dl, thumb_img, status2])
+             [video, dl, status2])
     b3.click(reset_all, pdir_state,
              [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-              pv_img, video, dl, thumb_img, status2])
+              pv_img, video, dl, status2])
 
 if __name__ == "__main__":
     demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
