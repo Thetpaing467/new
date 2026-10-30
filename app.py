@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 # ======================================================================
 # config
@@ -15,6 +15,9 @@ TARGET, MAXD = 4.2, 5.6
 
 # Subtitle box always has this many text lines (fixed size, never grows/shrinks)
 SUB_LINES = 2
+
+# Preview scrub range (seconds)
+PREVIEW_SECS = 5.0
 
 # Trim leading/trailing silence from each TTS clip, then pad 0.2s
 TRIM = (
@@ -54,7 +57,7 @@ _STORY = (
     "Keep the narrator calm and clear, like someone summarising a TV drama episode to a friend. "
     "Each output line is ONE complete narrated sentence, medium to long length, that flows "
     "naturally like a real story. Link actions with natural connectors (then, so, but, after that). "
-    
+
     # --- Natural Translation Rule ---
     "NATURAL TRANSLATION (very important): The source language can be English, Chinese, or any "
     "other language. DO NOT translate word-by-word or literally. Translate the MEANING, "
@@ -64,51 +67,51 @@ _STORY = (
     "situation. The final Burmese must sound like everyday spoken Burmese — smooth, clear, and "
     "meaningful — not like a machine or a textbook. If a translated line sounds confusing, "
     "unnatural, or meaningless, REWRITE it until it sounds natural in Burmese. "
-    
+
     # --- (5) Inner Thoughts & Motives ---
     "INNER THOUGHTS & MOTIVES: Do not just state what happened. Describe HOW it happened and WHY. "
     "Add the emotion and the tone of the character (e.g., 'angrily shouted', 'whispered with tears', "
     "'smiled coldly'). Make the listener feel the scene like they are watching a movie. "
-    
+
     # --- (6) Smooth Transitions ---
     "SMOOTH TRANSITIONS: Use varied transition words to connect scenes (e.g., 'at that moment', "
     "'meanwhile', 'suddenly', 'but then'). Avoid repeating the same connector (like 'then' or 'and') "
     "over and over. Make the story flow naturally from one event to the next. "
-    
+
     # --- (7) Highlight Plot Twists ---
     "HIGHLIGHT PLOT TWISTS: When there is a surprising turn or a twist in the story, emphasize it. "
     "Use dramatic phrasing to make the listener feel the shock (e.g., 'but the truth was...', "
     "'at that moment, a shocking event happened...'). "
-    
+
     # --- (9) Voice Tone & Pitch ---
     "VOICE TONE & PITCH: Write sentences that naturally convey the character's emotion through "
     "the words. For questions, use phrasing that sounds like a real question. For shock or surprise, "
     "use phrasing that sounds astonished (e.g., 'What? How did you know?'). "
-    
+
     # --- (11) Sentence Segmentation for TTS ---
     "SENTENCE SEGMENTATION: Keep sentences short and punchy. Do NOT write long, complex sentences. "
     "Break long thoughts into 2 or 3 short sentences so the TTS engine can read them with natural "
     "pauses and intonation. (e.g., 'Mike came home. It was raining. But the door was open.') "
-    
+
     # --- (14) Numbers & Symbols to Words ---
     "NUMBERS & SYMBOLS: Always write numbers and symbols as spoken words in the target language "
     "(e.g., '1 billion' -> 'တစ်ဘီလီယံ', '50%' -> 'ငါးဆယ်ရာခိုင်နှုန်း', '$100' -> 'ဒေါ်လာတစ်ရာ'). "
     "This helps the TTS engine read them naturally. "
-    
+
     # --- (16) Relationship Dynamics ---
     "RELATIONSHIP DYNAMICS: Clearly state the relationship between characters when it matters "
     "(e.g., 'Mike's boss, Jake...', 'Mike's ex-girlfriend, Mary...'). This helps the listener "
     "keep track of who is who and how they are connected. "
-    
+
     # --- (17) Emphasis on Key Points ---
     "EMPHASIS ON KEY POINTS: Use strong, clear language for the most important moments of the story "
     "(e.g., the lottery win, the big fight). Make those moments stand out so the listener remembers them. "
-    
+
     # --- (18) Context & Background ---
     "CONTEXT & BACKGROUND: If the listener needs background information to understand the scene, "
     "add it naturally (e.g., 'This story started 5 years ago...', 'Their relationship had changed "
     "since that day...'). Do NOT leave the listener confused. "
-    
+
     "Keep insults, jokes, arguments and emotions of the original, but report them rather than act "
     "them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not in the "
     "source lines. Do NOT address the audience. "
@@ -117,14 +120,14 @@ _STORY = (
     "fit the scene — for Burmese prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ်, "
     "ညည်းတယ်, သတိပေးတယ်, တိုက်တွန်းတယ်, ကတိပေးတယ်, ငြင်းတယ်, ဝန်ခံတယ်, ရယ်တယ်, ခြိမ်းခြောက်တယ်. "
     "The generic Burmese verb 'ပြောတယ်' may appear at most ONCE every four lines. "
-    
+
     # --- Natural Pronoun Rule ---
     "PRONOUNS: You may use natural Burmese pronouns like သူ (he/she), သူ့ (his/her), သူမ (she), "
     "သူတို့ (they), ကျွန်တော် (I, male), ကျွန်မ (I, female) when it sounds natural in the context "
     "and helps the story flow smoothly. Do NOT overuse them to the point of confusion. Always make "
     "sure the reader clearly understands WHO is being referred to. If there is a risk of confusion "
     "between two characters of the same gender, use their NAME instead of a pronoun. "
-    
+
     "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
     "name for the character and spell it the same way every time. If the name is NOT known, "
     "never write 'the person', 'a person' or 'someone'. "
@@ -175,7 +178,7 @@ LANG_CONF = {
                         "နေတယ်။, တော့တယ်။, ပြီ။, လေ။, ပေါ့။, and vary the ending from line to line. "
                         "Report speech with a VARIETY of verbs and structures, never the same "
                         "verb twice in a row and never 'ပြောတယ်' more than once every four lines. "
-                        
+
                         # --- Natural Translation Rule for Burmese ---
                         "ဘာသာပြန်တဲ့အခါ အင်္ဂလိပ်စာ၊ တရုတ်စာ ဘာပဲဖြစ်ဖြစ် စကားလုံးတစ်လုံးချင်း "
                         "တိုက်ရိုက်ဘာသာမပြန်ပါနဲ့။ မူရင်းစာသားရဲ့ အဓိပ္ပာယ်၊ ခံစားချက်နဲ့ "
@@ -184,7 +187,7 @@ LANG_CONF = {
                         "နားမလည်နိုင်တဲ့ စာသားတွေ၊ ဘာသာပြန်ဆိုးနေတဲ့ စာသားတွေ မထွက်ရဘူး။ "
                         "မြန်မာစကားပြောသလို ချောချောမွေ့မွေ့ ဖတ်ရလွယ်အောင်၊ အဓိပ္ပာယ်ရှိအောင် ရေးပေးပါ။ "
                         # ------------------------------------------
-                        
+
                         "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
                         "(၏၊ သည်၊ ၍). "
                         "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
@@ -335,7 +338,6 @@ import subprocess
 import sys
 import time
 import wave
-
 
 
 class Cancelled(Exception):
@@ -621,7 +623,8 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     lh_box = int(fs * 1.4)
     box_h = SUB_LINES * lh_box + 2 * pad_y
     box_h = min(box_h, H)
-    max_y = max(0, H - box_y)
+    # FIX: box_y was used before it was defined (UnboundLocalError -> empty preview)
+    max_y = max(0, H - box_h)
     box_y = max(0, min(int(pos_y / 100 * max_y), max_y))
 
     cur_fs = fs
@@ -741,7 +744,6 @@ import re
 import shutil
 import tempfile
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-
 
 
 def _fix_dropbox(url):
@@ -1029,7 +1031,6 @@ import shutil
 import threading
 
 
-
 def tts_edge(text, voice, rate, mp3, proxy=None):
     import edge_tts
 
@@ -1119,7 +1120,6 @@ import subprocess
 import threading
 
 import cv2
-
 
 
 def detect_crop(src):
@@ -1215,14 +1215,14 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
             put(None)
 
     log_path = out + ".log"
-    log = open(log_path, "wb")
+    log_fh = open(log_path, "wb")
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
            "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-i", audio,
            "-map", "0:v", "-map", "1:a:0",
            "-c:v", "libx264", "-preset", s.preset, "-crf", "27", "-pix_fmt", "yuv420p",
            "-threads", "0", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
            "-t", f"{total:.3f}", out]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_fh)
     th = threading.Thread(target=producer, daemon=True)
     th.start()
 
@@ -1272,7 +1272,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
             proc.wait()
         except Exception:
             pass
-        log.close()
+        log_fh.close()
         if os.path.exists(tmp_vid):
             os.remove(tmp_vid)
 
@@ -1289,50 +1289,84 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     return out
 
 
-def _preview_base_frame(src, base_png, height, crop):
-    if os.path.exists(base_png):
-        fr = cv2.imread(base_png)
-        if fr is not None:
-            return fr
-    clip = base_png + "_clip.mp4"
-    tmp = base_png + "_pv.mp4"
-    fr, ok = None, False
+# ---- preview (5-second scrubbable clip) ----------------------------------
+_NEON_CACHE = {}
+
+
+def _neon_for(W, H, th, speed):
+    key = (W, H, th, speed)
+    if key not in _NEON_CACHE:
+        if len(_NEON_CACHE) > 4:
+            _NEON_CACHE.clear()
+        _NEON_CACHE[key] = Neon(W, H, th, speed)
+    return _NEON_CACHE[key]
+
+
+def _preview_clip(src, clip_path, height, crop):
+    """Cut a short (~5.5s) prepared (cropped+scaled) clip once and cache it on disk."""
+    if os.path.exists(clip_path) and os.path.getsize(clip_path) > 1000:
+        return clip_path
+    raw = clip_path + "_raw.mp4"
+    tmp = clip_path + "_tmp.mp4"
     try:
         for ss in (["-ss", "1"], []):
-            subprocess.run(["ffmpeg", "-y", *ss, "-i", src, "-t", "3", "-an", "-c:v", "libx264",
-                            "-preset", "ultrafast", "-crf", "28", clip],
+            subprocess.run(["ffmpeg", "-y", *ss, "-i", src, "-t", f"{PREVIEW_SECS + 0.5:.1f}",
+                            "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+                            "-pix_fmt", "yuv420p", raw],
                            capture_output=True, text=True)
-            if os.path.exists(clip) and os.path.getsize(clip) > 1000:
+            if os.path.exists(raw) and os.path.getsize(raw) > 1000:
                 break
-        W, H = prepare_video(clip, tmp, height, crop)
-        cap = cv2.VideoCapture(tmp)
-        ok, fr = cap.read()
-        cap.release()
-        if ok:
-            fr = cv2.resize(fr, (W, H))
+        if not os.path.exists(raw) or os.path.getsize(raw) <= 1000:
+            raise RuntimeError("preview clip မရပါ")
+        prepare_video(raw, tmp, height, crop)
+        os.replace(tmp, clip_path)
     finally:
-        for f in (clip, tmp):
+        for f in (raw, tmp):
             if os.path.exists(f):
-                os.remove(f)
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+    return clip_path
+
+
+def _preview_frame_at(src, cache_dir, height, crop, t):
+    key = f"pv_clip_{os.path.getsize(src)}_{int(height)}_{int(bool(crop))}.mp4"
+    clip = _preview_clip(src, os.path.join(cache_dir, key), height, crop)
+    cap = cv2.VideoCapture(clip)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    idx = max(0, min(int(round(float(t) * fps)), n - 1))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+    ok, fr = cap.read()
     if not ok:
+        # fallback: sequential read up to idx (or last readable frame)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        fr = None
+        for _ in range(idx + 1):
+            ok2, f2 = cap.read()
+            if not ok2:
+                break
+            fr = f2
+    cap.release()
+    if fr is None:
         raise RuntimeError("preview frame မရပါ")
-    cv2.imwrite(base_png, fr)
     return fr
 
 
-def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
-    base_png = os.path.join(os.path.dirname(os.path.abspath(out_png)),
-                            f"pv_base_{os.path.getsize(src)}_{int(s.height)}_{int(bool(s.crop))}.png")
-    base = _preview_base_frame(src, base_png, s.height, s.crop)
+def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
+    cache_dir = os.path.dirname(os.path.abspath(out_png))
+    t = max(0.0, min(float(t), PREVIEW_SECS))
+    base = _preview_frame_at(src, cache_dir, s.height, s.crop, t)
     H, W = base.shape[:2]
     fr = zoom_flip(base.copy(), s.zoom, s.flip)
     if s.neon:
-        Neon(W, H, s.neon_th, s.neon_speed).apply(fr, 1.0)
+        _neon_for(W, H, s.neon_th, s.neon_speed).apply(fr, t)
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
         if ov:
-            blend_overlay(fr, ov, 0.5 if s.sub_sweep else None)
+            blend_overlay(fr, ov, (t / PREVIEW_SECS) if s.sub_sweep else None)
     cv2.imwrite(out_png, fr)
     return out_png
 
@@ -1341,7 +1375,6 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True):
 # ======================================================================
 import json
 import os
-
 
 
 class Project:
@@ -1412,7 +1445,6 @@ import hashlib
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 
 
 def init_project(path, source, height=720, cookies_file=None, progress=None):
@@ -1770,7 +1802,7 @@ def cmd_preview(args):
     font = find_font(s.lang, s.font)
     out = args.output or os.path.join(proj.path, "preview.png")
     make_preview_frame(proj.video, out, s, LANG_CONF[s.lang]["sample"], font,
-                       LANG_CONF[s.lang]["is_mm"])
+                       LANG_CONF[s.lang]["is_mm"], getattr(args, "at", 0.0) or 0.0)
     print(f"✅ {out}")
 
 
@@ -1843,6 +1875,7 @@ def build_parser():
     a = sub.add_parser("preview", help="စာတန်း/neon style စစ်ဖို့ ပုံတစ်ပုံ")
     a.add_argument("dir")
     a.add_argument("-o", "--output")
+    a.add_argument("--at", type=float, default=0.0, help="preview time (0-5 seconds)")
     add_style_args(a)
     a.set_defaults(fn=cmd_preview)
 
@@ -1955,7 +1988,8 @@ def start_fetch(url, upload, height):
     return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
 
-def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep):
+def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
+               pv_t):
     """Timer က ၁ စက္ကန့်တစ်ခါ ခေါ်မယ် — % ပြ၊ ပြီးရင် Preview ထုတ်ပြီး timer ရပ်။"""
     st = FETCH.get(jid) if jid else None
     if st is None:
@@ -1973,13 +2007,13 @@ def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos,
     pdir, proj = st["res"]
     mb = os.path.getsize(proj.video) / 1e6
     img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
-                   sweep, False)
+                   sweep, pv_t, False)
     return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ",
             img, gr.Timer(active=False))
 
 
 def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
-             strict):
+             pv_t, strict):
     if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
         if strict:
             raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
@@ -2002,7 +2036,7 @@ def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, 
                 pass
         out = os.path.join(pdir, f"preview_{int(time.time() * 1000)}.png")
         make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
-                           LANG_CONF[code]["is_mm"])
+                           LANG_CONF[code]["is_mm"], float(pv_t or 0.0))
         return out
     except Exception as ex:
         log(f"preview error: {ex}")
@@ -2078,6 +2112,19 @@ def poll_step1(jid):
 
 
 # ---------------------------------------------------------------- step 2 (tts + render)
+def _make_thumb(video_path, thumb_path):
+    """Extract a still frame so the result shows a picture without having to press play."""
+    for ss in ("1", "0"):
+        try:
+            sh(["ffmpeg", "-y", "-ss", ss, "-i", video_path, "-frames:v", "1",
+                "-q:v", "3", thumb_path])
+            if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 100:
+                return thumb_path
+        except Exception:
+            continue
+    return None
+
+
 def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_ref,
           height, fps, preset, max_speed, crop, flip, zoom,
           sub, sub_size, sub_pos, neon, sweep, progress=gr.Progress()):
@@ -2109,17 +2156,27 @@ def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_
         raise
     except Exception as ex:
         raise gr.Error(str(ex)[:600])
-    out = os.path.join(pdir, f"final_{code}.mp4")
+
+    # old results out; unique file name so the browser never shows a stale/blank cached video
+    for old in glob.glob(os.path.join(pdir, "final_*.mp4")) + glob.glob(os.path.join(pdir, "final_*.jpg")):
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    stamp = int(time.time())
+    out = os.path.join(pdir, f"final_{code}_{stamp}.mp4")
     shutil.copy(res["final"], out)
+    thumb = _make_thumb(out, os.path.join(pdir, f"final_{code}_{stamp}.jpg"))
     mb = os.path.getsize(out) / 1e6
-    return out, out, f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
+    return (out, out, thumb,
+            f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB")
 
 
 def reset_all(pdir):
     if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
         shutil.rmtree(pdir, ignore_errors=True)
-    # pdir_state, status_fetch, status1, chunks_state, parts_state, translated, pv_img, video, dl, status2
-    return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
+    # pdir_state, status_fetch, status1, chunks_state, parts_state, translated, pv_img, video, dl, thumb, status2
+    return "", "", "", [], {}, "", None, None, None, None, "🗑️ ရှင်းပြီး"
 
 
 def make_setter(lo, hi):
@@ -2139,7 +2196,7 @@ def make_setter(lo, hi):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 14`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 15`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -2174,6 +2231,8 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
 
     gr.Markdown("### 🎨 စာတန်း / Neon (Preview ကြည့်ပြီး ချိန်ပါ)")
     pv_img = gr.Image(label="Preview", type="filepath", interactive=False)
+    pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
+                     label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့် · ဆွဲပြီး ရွှေ့ကြည့်ပါ)")
     with gr.Accordion("🎛️ စာတန်း / Neon / Mirror", open=False):
         with gr.Row():
             sub = gr.Checkbox(True, label="စာတန်း")
@@ -2184,19 +2243,20 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
         sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
         zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
-    pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep]
+    pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep, pv_t]
     fetch_job = gr.State("")
     fetch_timer = gr.Timer(1.0, active=False)
     for trig in (url.submit, b_fetch.click, upload.upload):
         trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
     fetch_timer.tick(poll_fetch,
-                     [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep],
+                     [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
+                      sweep, pv_t],
                      [pdir_state, status_fetch, pv_img, fetch_timer],
                      show_progress="hidden")
 
     # Slider: .release က phone (touch) မှာ မခံစားရလို့ .change သုံးတယ်၊
     # always_last = ဆွဲနေတုန်း တန်းစီမနေဘဲ နောက်ဆုံးတန်ဖိုးပဲ ယူမယ်
-    for c in (sub_size, sub_pos, zoom, sub, sweep, neon, flip, lang):
+    for c in (sub_size, sub_pos, zoom, sub, sweep, neon, flip, lang, pv_t):
         c.change(preview_auto, pv_in, pv_img,
                  trigger_mode="always_last", show_progress="hidden", queue=True)
 
@@ -2231,7 +2291,9 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     gr.Markdown("### 2️⃣ အသံထုတ် + Video")
     b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
     status2 = gr.Markdown()
-    video = gr.Video(label="ရလဒ်")
+    # autoplay=True -> result shows/plays right away (no need to tap to make it appear)
+    video = gr.Video(label="ရလဒ်", autoplay=True)
+    thumb_img = gr.Image(label="ရလဒ် Thumbnail", type="filepath", interactive=False)
     dl = gr.File(label="⬇️ Download MP4")
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
@@ -2245,10 +2307,10 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
     b2.click(step2, [pdir_state, translated, parts_state, lang, engine, voice, rate, workers,
                      vox_ref, height, fps, preset, max_speed, crop, flip, zoom,
                      sub, sub_size, sub_pos, neon, sweep],
-             [video, dl, status2])
+             [video, dl, thumb_img, status2])
     b3.click(reset_all, pdir_state,
              [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-              pv_img, video, dl, status2])
+              pv_img, video, dl, thumb_img, status2])
 
 if __name__ == "__main__":
     demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
