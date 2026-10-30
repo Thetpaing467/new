@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.4.3"
+__version__ = "1.4.4"
 
 # ======================================================================
 # config
@@ -52,10 +52,10 @@ _STORY = (
     "(mother, father, boss, neighbour and so on) and use the character names or relationship words. "
     "Turn first-person and second-person speech into third person. "
     "Keep the narrator calm and clear, like someone summarising a TV drama episode to a friend. "
-    "Each output line is ONE complete narrated sentence, medium length, that ends like a finished "
-    "statement. Link actions with natural connectors (then, so, but, after that, at this moment). "
+    "Each output line is ONE complete narrated sentence, medium to long length, that flows "
+    "naturally like a real story. Link actions with natural connectors (then, so, but, after that). "
     
-    # --- NEW: Natural Translation Rule for ALL languages ---
+    # --- Natural Translation Rule ---
     "NATURAL TRANSLATION (very important): The source language can be English, Chinese, or any "
     "other language. DO NOT translate word-by-word or literally. Translate the MEANING, "
     "INTENTION, and EMOTION, not just the words. Idioms, slang, proverbs, and cultural references "
@@ -64,41 +64,30 @@ _STORY = (
     "situation. The final Burmese must sound like everyday spoken Burmese — smooth, clear, and "
     "meaningful — not like a machine or a textbook. If a translated line sounds confusing, "
     "unnatural, or meaningless, REWRITE it until it sounds natural in Burmese. "
-    # -------------------------------------------------------
-
-    "REPORTING VERB VARIETY (very important, especially for Burmese): NEVER repeat the same "
-    "reporting verb in two consecutive lines, and never fall into a pattern where most lines "
-    "use the same generic verb (for Burmese, 'ပြောတယ်'). Rotate through the whole vocabulary of "
-    "reporting and reaction verbs that fit the scene — for Burmese prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, "
-    "ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ်, ညည်းတယ်, သတိပေးတယ်, တိုက်တွန်းတယ်, ကတိပေးတယ်, ငြင်းတယ်, "
-    "ဝန်ခံတယ်, ရယ်တယ်, ခြိမ်းခြောက်တယ်, ခေါ်တယ်, ပြောလိုက်တယ်, ဆူတယ်, နှစ်သိမ့်တယ်; for German "
-    "sagte, fragte, antwortete, erklärte, erwiderte, rief, flüsterte, warnte, versprach, "
-    "leugnete, gab zu, lachte, drohte, bat; for Japanese 言った, 尋ねた, 答えた, 説明した, "
-    "返した, 叫んだ, 囁いた, 警告した, 約束した, 否定した, 認めた, 笑った, 脅した, 頼んだ. "
-    "The generic Burmese verb 'ပြောတယ်' may appear at most ONCE every four lines — prefer the "
-    "more specific verbs above first. "
-    "Also vary the sentence shape: sometimes put the reported speech first and the verb last, "
-    "sometimes put the reaction/action first and the speech after. Where the action alone makes "
-    "the meaning clear, you may drop the reporting verb entirely and state what happened "
-    "(for Burmese, e.g. '... လို့ မေးလိုက်တော့ အမေက ခေါင်းညိတ်တယ်'). "
-    "NO PRONOUNS (very important): NEVER use any pronoun for a character, in any form "
-    "(subject, object or possessive). That means no he, she, him, her, his, they, them, their, "
-    "I, me, my, you, your, we, us, and no equivalent word in the target language "
-    "(Burmese: သူ, သူ့, သူမ, သူတို့, ကျွန်တော်, ကျွန်တော်တို့, ကျွန်မ, ကျွန်မတို့, ငါ, ငါတို့, "
-    "နင်, နင်တို့, မင်း, မင်းတို့, ခင်ဗျား, ရှင်, ကျွန်ုပ်; "
-    "German: er, sie, ihn, ihm, ihr, sein, ich, du, wir, ihr, mich, dich; "
-    "Japanese: 彼, 彼女, 彼ら, 私, 僕, 俺, あなた, お前, 君). "
-    "Every time a character is the subject, the object or the owner of something, write the "
-    "character's NAME again, even if the same name repeats in every sentence. "
-    "Never replace a name with a pronoun to avoid repetition. "
+    
+    "Keep insults, jokes, arguments and emotions of the original, but report them rather than act "
+    "them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not in the "
+    "source lines. Do NOT address the audience. "
+    "REPORTING VERB VARIETY (very important): NEVER repeat the same reporting verb in two "
+    "consecutive lines. Rotate through the whole vocabulary of reporting and reaction verbs that "
+    "fit the scene — for Burmese prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ်, "
+    "ညည်းတယ်, သတိပေးတယ်, တိုက်တွန်းတယ်, ကတိပေးတယ်, ငြင်းတယ်, ဝန်ခံတယ်, ရယ်တယ်, ခြိမ်းခြောက်တယ်. "
+    "The generic Burmese verb 'ပြောတယ်' may appear at most ONCE every four lines. "
+    
+    # --- Natural Pronoun Rule (Updated) ---
+    "PRONOUNS: You may use natural Burmese pronouns like သူ (he/she), သူ့ (his/her), သူမ (she), "
+    "သူတို့ (they), ကျွန်တော် (I, male), ကျွန်မ (I, female) when it sounds natural in the context "
+    "and helps the story flow smoothly. Do NOT overuse them to the point of confusion. Always make "
+    "sure the reader clearly understands WHO is being referred to. If there is a risk of confusion "
+    "between two characters of the same gender, use their NAME instead of a pronoun. "
+    
     "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
     "name for the character and spell it the same way every time. If the name is NOT known, "
-    "never use any pronoun and never write 'the person', 'a person' or 'someone'. "
+    "never write 'the person', 'a person' or 'someone'. "
     "BURMESE UNNAMED CHARACTER (very important): NEVER write လူတစ်ယောက် (a person), "
-    "လူတစ်ဦး or တစ်ယောက် for a character, and NEVER write ကျွန်တော် or any other pronoun "
-    "in its place. Whenever the character's name is not known, use the relationship word if "
-    "the dialogue makes it clear (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, သူဌေး, ဧည့်သည်) and attach the "
-    "character name before it when the name is known (example pattern: the name + ရဲ့ + "
+    "လူတစ်ဦး or တစ်ယောက် for a character. Whenever the character's name is not known, use the "
+    "relationship word if the dialogue makes it clear (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, သူဌေး, ဧည့်သည်) "
+    "and attach the character name before it when the name is known (example pattern: the name + ရဲ့ + "
     "relationship word); if nothing is clear, simply leave the subject out of the sentence "
     "(Burmese does not need a subject word) and write only the action or the speech. "
     "If a second unnamed character appears in the same scene, use a role word for that second "
@@ -142,31 +131,21 @@ LANG_CONF = {
                         "နေတယ်။, တော့တယ်။, ပြီ။, လေ။, ပေါ့။, and vary the ending from line to line. "
                         "Report speech with a VARIETY of verbs and structures, never the same "
                         "verb twice in a row and never 'ပြောတယ်' more than once every four lines. "
-                        "Choose from: '... လို့ ဆိုတယ်', '... လို့ မေးတယ်', '... လို့ ဖြေတယ်', "
-                        "'... လို့ ရှင်းပြတယ်', '... လို့ ပြန်ပြောတယ်', '... လို့ အော်တယ်', "
-                        "'... လို့ ညည်းတယ်', '... လို့ သတိပေးတယ်', '... လို့ တိုက်တွန်းတယ်', "
-                        "'... လို့ ကတိပေးတယ်', '... လို့ ငြင်းတယ်', '... လို့ ဝန်ခံတယ်', "
-                        "'... လို့ ရယ်တယ်', '... လို့ ခြိမ်းခြောက်တယ်'. "
-                        "Where the action already shows what happened, you may drop the "
-                        "reporting verb and just state the action "
-                        "(e.g. '... လို့ မေးလိုက်တော့ အမေက ခေါင်းညိတ်တယ်'). "
                         
-                        # --- NEW: Natural Translation Rule for Burmese ---
+                        # --- Natural Translation Rule for Burmese ---
                         "ဘာသာပြန်တဲ့အခါ အင်္ဂလိပ်စာ၊ တရုတ်စာ ဘာပဲဖြစ်ဖြစ် စကားလုံးတစ်လုံးချင်း "
                         "တိုက်ရိုက်ဘာသာမပြန်ပါနဲ့။ မူရင်းစာသားရဲ့ အဓိပ္ပာယ်၊ ခံစားချက်နဲ့ "
                         "ဆိုလိုရင်းကို မြန်မာလို သဘာဝကျကျ ပြန်ပေးပါ။ ဆိုစကား၊ စကားအသုံးအနှုန်းတွေကို "
                         "မြန်မာလူမျိုး နားလည်လွယ်တဲ့ စကားပြောပုံစံအတိုင်း ပြန်ပေးပါ။ "
                         "နားမလည်နိုင်တဲ့ စာသားတွေ၊ ဘာသာပြန်ဆိုးနေတဲ့ စာသားတွေ မထွက်ရဘူး။ "
                         "မြန်မာစကားပြောသလို ချောချောမွေ့မွေ့ ဖတ်ရလွယ်အောင်၊ အဓိပ္ပာယ်ရှိအောင် ရေးပေးပါ။ "
-                        # --------------------------------------------------
+                        # ------------------------------------------
                         
                         "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
                         "(၏၊ သည်၊ ၍). "
                         "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
                         "Transliterate spoken names into Burmese script the same way every time; "
-                        "never use pronouns such as သူ၊ သူ့၊ သူမ၊ သူတို့၊ ကျွန်တော်၊ ကျွန်မ၊ ငါ၊ နင်၊ မင်း — "
-                        "always repeat the character name instead; "
-                        "when a name is unknown NEVER write လူတစ်ယောက် and NEVER write ကျွန်တော် — "
+                        "when a name is unknown NEVER write လူတစ်ယောက် — "
                         "use the relationship / role word, or leave the subject out."),
                 name="Burmese")
         ),
@@ -192,8 +171,7 @@ LANG_CONF = {
                 script="use ONLY German (Latin script), no Chinese letters.",
                 accent=("Use relaxed spoken German (contractions like 'ist's', 'gibt's' are fine, "
                         "connectors like 'und dann', 'plötzlich', 'also', 'aber') and put a comma "
-                        "at every natural breath point. Never use personal pronouns for characters "
-                        "(er, sie, ihn, ihm, ihr, sein, ich, du, wir); repeat the character name instead. "
+                        "at every natural breath point. "
                         "Vary the reporting verb: never the same verb twice in a row, and never "
                         "'sagte' more than once every four lines — rotate sagte, fragte, antwortete, "
                         "erklärte, erwiderte, rief, flüsterte, warnte, versprach, leugnete, gab zu, "
@@ -227,8 +205,7 @@ LANG_CONF = {
                        "letters except kanji.",
                 accent=("Use a warm, natural spoken storyteller tone (mix だ/だった and です/ました "
                         "naturally, with softeners like でも、そして、すると). Use '、' at every "
-                        "breath point and '。' to end a sentence. Never use pronouns for characters "
-                        "(彼, 彼女, 彼ら, 私, 僕, あなた); repeat the character name instead. "
+                        "breath point and '。' to end a sentence. "
                         "Vary the reporting verb: never the same verb twice in a row, and never "
                         "'言った' more than once every four lines — rotate 言った, 尋ねた, 答えた, "
                         "説明した, 返した, 叫んだ, 囁いた, 警告した, 約束した, 否定した, 認めた, "
@@ -972,7 +949,7 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
         note = (f"(PART {k + 1} of {total} of the same episode. Only lines [{lo}] to [{hi - 1}]. "
                 f"Keep the SAME numbers. Keep character names and role words consistent "
                 f"with the other parts. Never use pronouns, always repeat the character name. "
-                f"For Burmese, when a name is unknown never write လူတစ်ယောက် or ကျွန်တော် — "
+                f"For Burmese, when a name is unknown never write လူတစ်ယောက် — "
                 f"use a role word or leave the subject out. "
                 f"For Burmese, do not end every line with ပါတယ်; use it only when needed. "
                 f"For Burmese, vary the reporting verb — 'ပြောတယ်' at most once every four lines; "
