@@ -2,7 +2,7 @@
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
 """
-__version__ = "1.4.2"
+__version__ = "1.4.3"
 
 # ======================================================================
 # config
@@ -54,9 +54,18 @@ _STORY = (
     "Keep the narrator calm and clear, like someone summarising a TV drama episode to a friend. "
     "Each output line is ONE complete narrated sentence, medium length, that ends like a finished "
     "statement. Link actions with natural connectors (then, so, but, after that, at this moment). "
-    "Keep insults, jokes, arguments and emotions of the original, but report them rather than act "
-    "them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not in the "
-    "source lines. Do NOT address the audience. "
+    
+    # --- NEW: Natural Translation Rule for ALL languages ---
+    "NATURAL TRANSLATION (very important): The source language can be English, Chinese, or any "
+    "other language. DO NOT translate word-by-word or literally. Translate the MEANING, "
+    "INTENTION, and EMOTION, not just the words. Idioms, slang, proverbs, and cultural references "
+    "must be converted into their closest natural Burmese equivalent. If there is no direct "
+    "equivalent, rewrite the sentence so a native Burmese speaker immediately understands the "
+    "situation. The final Burmese must sound like everyday spoken Burmese — smooth, clear, and "
+    "meaningful — not like a machine or a textbook. If a translated line sounds confusing, "
+    "unnatural, or meaningless, REWRITE it until it sounds natural in Burmese. "
+    # -------------------------------------------------------
+
     "REPORTING VERB VARIETY (very important, especially for Burmese): NEVER repeat the same "
     "reporting verb in two consecutive lines, and never fall into a pattern where most lines "
     "use the same generic verb (for Burmese, 'ပြောတယ်'). Rotate through the whole vocabulary of "
@@ -141,6 +150,16 @@ LANG_CONF = {
                         "Where the action already shows what happened, you may drop the "
                         "reporting verb and just state the action "
                         "(e.g. '... လို့ မေးလိုက်တော့ အမေက ခေါင်းညိတ်တယ်'). "
+                        
+                        # --- NEW: Natural Translation Rule for Burmese ---
+                        "ဘာသာပြန်တဲ့အခါ အင်္ဂလိပ်စာ၊ တရုတ်စာ ဘာပဲဖြစ်ဖြစ် စကားလုံးတစ်လုံးချင်း "
+                        "တိုက်ရိုက်ဘာသာမပြန်ပါနဲ့။ မူရင်းစာသားရဲ့ အဓိပ္ပာယ်၊ ခံစားချက်နဲ့ "
+                        "ဆိုလိုရင်းကို မြန်မာလို သဘာဝကျကျ ပြန်ပေးပါ။ ဆိုစကား၊ စကားအသုံးအနှုန်းတွေကို "
+                        "မြန်မာလူမျိုး နားလည်လွယ်တဲ့ စကားပြောပုံစံအတိုင်း ပြန်ပေးပါ။ "
+                        "နားမလည်နိုင်တဲ့ စာသားတွေ၊ ဘာသာပြန်ဆိုးနေတဲ့ စာသားတွေ မထွက်ရဘူး။ "
+                        "မြန်မာစကားပြောသလို ချောချောမွေ့မွေ့ ဖတ်ရလွယ်အောင်၊ အဓိပ္ပာယ်ရှိအောင် ရေးပေးပါ။ "
+                        # --------------------------------------------------
+                        
                         "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
                         "(၏၊ သည်၊ ၍). "
                         "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
@@ -2099,7 +2118,7 @@ def make_setter(lo, hi):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 12`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 13`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
