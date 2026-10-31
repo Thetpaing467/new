@@ -1,8 +1,8 @@
-"""Recap CLI (single file): Whisper -> Gemini (manual) -> TTS -> smart-sync render.
+"""Recap CLI (single file): Whisper -> Gemini (manual) -> TTS -> smart-sync render -> auto split.
 
-Usage: python recap.py run <video|url> -d work/ep1 --lang my
+Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
 """
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 # ======================================================================
 # config
@@ -301,6 +301,8 @@ class Settings:
     crop: bool = True             # auto-remove black bars
     flip: bool = True             # mirror horizontally
     zoom: float = 1.0
+    # Split (download အပိုင်းခွဲ)
+    split_min: float = 2.0        # minutes per part · 0 = မခွဲဘူး
     # Subtitles
     sub: bool = True
     sub_size: float = 7.0         # % of width
@@ -1289,6 +1291,51 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     return out
 
 
+# ---- video splitter (download အတွက် အပိုင်းခွဲ) ----------------------------
+def split_plan(total, seg_secs):
+    """Return [(start, duration), ...].
+
+    Every part is seg_secs long, and whatever is left over at the end is merged
+    into the LAST part (6:20 @ 2min -> 2:00, 2:00, 2:20 ; never a tiny 0:20 clip).
+    seg_secs <= 0 or a video not longer than one segment -> a single part.
+    """
+    total = float(total)
+    seg = float(seg_secs)
+    if seg <= 0 or total <= seg:
+        return [(0.0, total)]
+    n = max(1, int(total // seg))
+    starts = [i * seg for i in range(n)]
+    plan = []
+    for i, st in enumerate(starts):
+        end = total if i == n - 1 else starts[i + 1]
+        plan.append((st, end - st))
+    return plan
+
+
+def split_video(src, out_prefix, seg_min=2.0, progress=None):
+    """Cut `src` into parts of `seg_min` minutes (leftover merged into the last part).
+
+    Files are named <out_prefix>_part01.mp4, _part02.mp4 ...
+    Returns the list of part paths (or [src] when no split is needed).
+    Re-encodes (ultrafast) so cuts are frame-accurate and every part starts cleanly.
+    """
+    total = probe_duration(src)
+    plan = split_plan(total, float(seg_min) * 60.0)
+    if len(plan) <= 1:
+        return [src]
+    outs = []
+    n = len(plan)
+    for k, (st, dur) in enumerate(plan):
+        out = f"{out_prefix}_part{k + 1:02d}.mp4"
+        sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-i", src, "-t", f"{dur:.3f}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out])
+        outs.append(out)
+        if progress:
+            progress((k + 1) / n, f"အပိုင်းခွဲနေတယ် {k + 1}/{n}")
+    return outs
+
+
 # ---- preview (5-second scrubbable clip) ----------------------------------
 _NEON_CACHE = {}
 
@@ -1681,6 +1728,8 @@ def add_style_args(p):
                    help="black bar auto-crop မလုပ်ဘူး")
     g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP,
                    help="mirror မလုပ်ဘူး")
+    g.add_argument("--split", dest="split_min", type=float, default=SUP,
+                   help="video ကို မိနစ်အလိုက် အပိုင်းခွဲ (default 2 · 0 = မခွဲဘူး)")
     g = p.add_argument_group("subtitles / neon")
     g.add_argument("--no-sub", dest="sub", action="store_false", default=SUP)
     g.add_argument("--no-sweep", dest="sub_sweep", action="store_false", default=SUP,
@@ -1713,6 +1762,7 @@ def settings_for(proj, args):
     s.zoom = max(1.0, min(1.25, s.zoom))
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
+    s.split_min = max(0.0, float(s.split_min))
     if s.voice and s.engine == "edge":
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -1792,6 +1842,25 @@ def cmd_render(args, proj=None):
     mb = os.path.getsize(out) / 1e6
     print(f"\n✅ ပြီးပြီ: {out}  ({mb:.1f} MB)")
     print(f"   {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s)")
+
+    # ---- split into parts (leftover merged into the last part) ----
+    if s.split_min and s.split_min > 0:
+        prefix = os.path.splitext(out)[0]
+        for old in glob.glob(prefix + "_part*.mp4"):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        sp = Progress()
+        parts = split_video(out, prefix, s.split_min, sp)
+        sp.done()
+        if len(parts) > 1:
+            print(f"✂️ {len(parts)} ပိုင်း ခွဲပြီး:")
+            for p_ in parts:
+                print(f"   {p_}  ({fmt_t(probe_duration(p_))}, {os.path.getsize(p_) / 1e6:.1f} MB)")
+        else:
+            print(f"✂️ video က {s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ")
+
     t = {**{"transcribe": proj.data["timings"].get("transcribe", 0)}, **res["timings"]}
     print("⏱️\n" + timing_table({k: v for k, v in t.items() if v}))
 
@@ -1837,7 +1906,7 @@ def cmd_run(args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="recap.py",
-        description="Recap video dubber: Whisper -> Gemini (manual) -> TTS -> smart-sync render")
+        description="Recap video dubber: Whisper -> Gemini (manual) -> TTS -> smart-sync render -> split")
     p.add_argument("--version", action="version", version=f"recap-cli {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1866,7 +1935,7 @@ def build_parser():
     a.add_argument("--lang", type=resolve_lang, default=None)
     a.set_defaults(fn=cmd_apply)
 
-    a = sub.add_parser("render", help="အသံထုတ် + Video ပေါင်း")
+    a = sub.add_parser("render", help="အသံထုတ် + Video ပေါင်း + အပိုင်းခွဲ")
     a.add_argument("dir")
     a.add_argument("-o", "--output", help="final mp4 ကို ဒီနေရာ copy")
     add_style_args(a)
@@ -2111,10 +2180,10 @@ def poll_step1(jid):
             chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
 
 
-# ---------------------------------------------------------------- step 2 (tts + render)
+# ---------------------------------------------------------------- step 2 (tts + render + split)
 def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_ref,
           height, fps, preset, max_speed, crop, flip, zoom,
-          sub, sub_size, sub_pos, neon, sweep, progress=gr.Progress()):
+          sub, sub_size, sub_pos, neon, sweep, split_min, progress=gr.Progress()):
     if not pdir or not os.path.isdir(pdir):
         raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
     code = LANGS[lang_name]
@@ -2135,16 +2204,19 @@ def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_
         s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
         s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
         s.sub_sweep = bool(sweep)
+        s.split_min = max(0.0, float(split_min or 0))
         s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
+        # render = 0 → 0.9 , split = 0.9 → 1.0
         prog = Progress(0.0, 1.0, parent=_cb(progress))
         res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None,
-                         os.environ.get("HF_TOKEN") or None, prog)
+                         os.environ.get("HF_TOKEN") or None, prog.sub(0.0, 0.9))
     except gr.Error:
         raise
     except Exception as ex:
         raise gr.Error(str(ex)[:600])
 
     # old results out; unique file name so the browser never shows a stale/blank cached video
+    # (pattern also removes the old *_partNN.mp4 files)
     for old in glob.glob(os.path.join(pdir, "final_*.mp4")):
         try:
             os.remove(old)
@@ -2154,8 +2226,26 @@ def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_
     out = os.path.join(pdir, f"final_{code}_{stamp}.mp4")
     shutil.copy(res["final"], out)
     mb = os.path.getsize(out) / 1e6
-    return (out, out,
-            f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB")
+
+    files = [out]
+    split_note = ""
+    if s.split_min > 0:
+        try:
+            parts_out = split_video(out, os.path.splitext(out)[0], s.split_min,
+                                    prog.sub(0.9, 1.0))
+        except Exception as ex:
+            raise gr.Error(f"အပိုင်းခွဲလို့ မရပါ: {str(ex)[:400]}")
+        if len(parts_out) > 1:
+            files = parts_out
+            durs = [probe_duration(p) for p in parts_out]
+            split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း ခွဲပြီး · "
+                          + " · ".join(f"P{k + 1} {fmt_t(d)}" for k, d in enumerate(durs)))
+        else:
+            split_note = f"\n\n✂️ video က {s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ"
+
+    return (out, files,
+            f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
+            + split_note)
 
 
 def reset_all(pdir):
@@ -2182,7 +2272,7 @@ def make_setter(lo, hi):
 
 # ---------------------------------------------------------------- UI layout
 with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 15`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon")
+    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 16`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon → ✂️ အပိုင်းခွဲ Download")
     pdir_state = gr.State("")
 
     # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
@@ -2275,11 +2365,14 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
                     box.change(make_setter(c["lo"], c["hi"]), [box, parts_state], [parts_state, st])
 
     gr.Markdown("### 2️⃣ အသံထုတ် + Video")
+    split_min = gr.Slider(0, 10, value=2, step=0.5,
+                          label="✂️ Download အပိုင်းခွဲ (မိနစ်) · 0 = မခွဲဘူး · ကျန်တဲ့ စက္ကန့်တွေကို နောက်ဆုံးအပိုင်းမှာ ပေါင်းထည့်မယ်")
     b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
     status2 = gr.Markdown()
     # autoplay=True -> result shows/plays right away (no need to tap to make it appear)
     video = gr.Video(label="ရလဒ်", autoplay=True)
-    dl = gr.File(label="⬇️ Download MP4")
+    dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲထားရင် ဖိုင်တစ်ခုချင်း နှိပ်ဒေါင်း)",
+                 file_count="multiple")
     b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
     # 1️⃣ Whisper: ခလုတ်နှိပ်ရင် job စပြီး Timer က status1 မှာ % ကို ၁ စက္ကန့်တစ်ခါ update လုပ်မယ်
@@ -2291,7 +2384,7 @@ with gr.Blocks(title="Recap → Multi-Language") as demo:
 
     b2.click(step2, [pdir_state, translated, parts_state, lang, engine, voice, rate, workers,
                      vox_ref, height, fps, preset, max_speed, crop, flip, zoom,
-                     sub, sub_size, sub_pos, neon, sweep],
+                     sub, sub_size, sub_pos, neon, sweep, split_min],
              [video, dl, status2])
     b3.click(reset_all, pdir_state,
              [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
