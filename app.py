@@ -755,10 +755,92 @@ def _fix_dropbox(url):
     return urlunparse(u._replace(query=urlencode(q, doseq=True)))
 
 
-def _dl_direct(url, out, progress=None):
+# ---- Rednote / Xiaohongshu (page ထဲက video URL ကို တိုက်ရိုက်ထုတ်) -------------
+_RED_HOSTS = ("xhslink.com", "xiaohongshu.com", "rednote.com", "xhs.cn")
+_RED_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+           "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+
+
+def extract_url(text):
+    """Share စာသားတစ်ခုလုံး paste လုပ်ထားရင်တောင် ထဲက http(s) link ကို ထုတ်ယူ။"""
+    text = (text or "").strip()
+    if os.path.isfile(text):
+        return text
+    m = re.search(r"https?://[^\s\"'<>，。！）)]+", text)
+    return m.group(0).rstrip(".,;:!?") if m else text
+
+
+def _is_rednote(host):
+    host = host.lower()
+    return any(host == h or host.endswith("." + h) for h in _RED_HOSTS)
+
+
+def _walk(o, out):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k == "masterUrl" and isinstance(v, str):
+                out.insert(0, v)
+            elif k in ("backupUrls", "backup_urls") and isinstance(v, list):
+                out.extend(x for x in v if isinstance(x, str))
+            elif k == "originVideoKey" and isinstance(v, str) and v:
+                out.append("https://sns-video-bd.xhscdn.com/" + v.lstrip("/"))
+            else:
+                _walk(v, out)
+    elif isinstance(o, list):
+        for v in o:
+            _walk(v, out)
+
+
+def _red_video_urls(html):
+    import json
+    urls = []
+    m = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*</script>", html, re.S)
+    if m:
+        raw = re.sub(r"\bundefined\b", "null", m.group(1))
+        try:
+            _walk(json.loads(raw), urls)
+        except Exception:
+            pass
+    if not urls:   # JSON မဖတ်နိုင်ရင် regex နဲ့ တိုက်ရိုက်ရှာ
+        for u in re.findall(r'"(?:masterUrl|backupUrls?)"\s*:\s*\[?\s*"([^"]+)"', html):
+            urls.append(u.encode().decode("unicode_escape", "ignore"))
+        for u in re.findall(r'https?:\\?/\\?/sns-video[^"\\\s]+(?:\\/[^"\s\\]+)*', html):
+            urls.append(u.replace("\\u002F", "/").replace("\\/", "/"))
+    clean, seen = [], set()
+    for u in urls:
+        u = u.replace("\\u002F", "/").replace("\\/", "/")
+        if u.startswith("//"):
+            u = "https:" + u
+        u = u.replace("http://", "https://", 1)
+        if u.startswith("https://") and u not in seen:
+            seen.add(u)
+            clean.append(u)
+    return clean
+
+
+def _dl_rednote(url, out, progress=None):
+    import requests
+    hdr = {"User-Agent": _RED_UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+           "Referer": "https://www.xiaohongshu.com/"}
+    r = requests.get(url, headers=hdr, timeout=30, allow_redirects=True)
+    r.raise_for_status()
+    urls = _red_video_urls(r.text)
+    if not urls:
+        raise RuntimeError("Rednote page ထဲမှာ video URL မတွေ့ပါ (ပုံချည်းပါတဲ့ note ဖြစ်နိုင် / "
+                           "login လိုနေနိုင် / IP ပိတ်ခံရနိုင်)")
+    last = None
+    for u in urls[:6]:
+        try:
+            return _dl_direct(u, out, progress, headers=hdr)
+        except Exception as ex:
+            last = ex
+    raise RuntimeError(f"Rednote video ဖိုင် ဆွဲမရပါ: {str(last)[:200]}")
+
+
+def _dl_direct(url, out, progress=None, headers=None):
     import requests
     with requests.get(url, stream=True, timeout=30, allow_redirects=True,
-                      headers={"User-Agent": "Mozilla/5.0"}) as r:
+                      headers=headers or {"User-Agent": "Mozilla/5.0"}) as r:
         r.raise_for_status()
         if "text/html" in r.headers.get("content-type", "").lower():
             raise RuntimeError("Link က video ဖိုင် မဟုတ်ဘဲ web page ဖြစ်နေတယ်")
@@ -838,7 +920,7 @@ def ensure_mp4(raw, final, height):
 
 
 def fetch_video(source, final, height=720, progress=None, cookies_file=None):
-    source = source.strip()
+    source = extract_url(source)
 
     if not re.match(r"^https?://", source, re.I):
         if not os.path.isfile(source):
@@ -855,7 +937,9 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
             raw = _dl_gdrive(source, os.path.join(work, "gd.bin"))
         else:
             url = source
-            if "dropbox.com" in host:
+            if _is_rednote(host):
+                methods = ["rednote", "ytdlp"]
+            elif "dropbox.com" in host:
                 url = _fix_dropbox(url)
                 methods = ["direct", "ytdlp"]
             elif path_l.endswith(VIDEO_EXT):
@@ -864,14 +948,16 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
                 methods = ["ytdlp", "direct"]
             for m in methods:
                 try:
-                    if m == "direct":
+                    if m == "rednote":
+                        raw = _dl_rednote(url, os.path.join(work, "red.bin"), progress)
+                    elif m == "direct":
                         raw = _dl_direct(url, os.path.join(work, "direct.bin"), progress)
                     else:
                         raw = _dl_ytdlp(url, os.path.join(work, "yt"), height, progress,
                                         cookies_file)
                     break
                 except Exception as ex:
-                    errs.append(f"{m}: {str(ex)[:200]}")
+                    errs.append(f"{m}: {str(ex)[:300]}")
                     raw = None
             if not raw:
                 raise RuntimeError("Link ကနေ မဆွဲနိုင်ပါ\n" + "\n".join(errs))
@@ -2005,7 +2091,7 @@ def _cb(progress):
 
 def _source(url, upload):
     up = _path(upload)
-    return up or (url or "").strip()
+    return up or extract_url(url or "")
 
 
 def _pbar(frac, width=20):
