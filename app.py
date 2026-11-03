@@ -124,35 +124,45 @@ _STORY_CORE = (
     "the same person and use one spelling throughout. "
 )
 
-# ---- Burmese specific --------------------------------------------------
+# ---- Burmese specific (calm third-person movie/drama recap, mostly ပါတယ်။) ----
 _STORY_MY = (
-    "Examples of reported speech: 'Xiao Li said that ...', 'Xiao Li asked Mother ...', "
-    "'Mother firmly replied that ...', 'Boss Wang told Xiao Li ...'. "
-    "The final Burmese must sound like everyday spoken Burmese — smooth, clear and meaningful. "
-    "Idioms, slang, proverbs and cultural references must become their closest natural Burmese "
-    "equivalent. "
-    "NUMBERS & SYMBOLS (Burmese): '1 billion' -> 'တစ်ဘီလီယံ', '50%' -> 'ငါးဆယ်ရာခိုင်နှုန်း', "
-    "'$100' -> 'ဒေါ်လာတစ်ရာ'. "
-    "REPORTING VERB VARIETY (very important): NEVER repeat the same reporting verb in two "
-    "consecutive lines. Rotate through the whole vocabulary of reporting and reaction verbs that "
-    "fit the scene — for Burmese prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ်, "
-    "ညည်းတယ်, သတိပေးတယ်, တိုက်တွန်းတယ်, ကတိပေးတယ်, ငြင်းတယ်, ဝန်ခံတယ်, ရယ်တယ်, ခြိမ်းခြောက်တယ်. "
-    "The generic Burmese verb 'ပြောတယ်' may appear at most ONCE every four lines. "
-    "PRONOUNS: you may use natural Burmese pronouns like သူ (he/she), သူ့ (his/her), သူမ (she), "
-    "သူတို့ (they), ကျွန်တော် (I, male), ကျွန်မ (I, female) when it sounds natural in the context "
-    "and helps the story flow smoothly. Do NOT overuse them to the point of confusion. Always make "
-    "sure the reader clearly understands WHO is being referred to. If there is a risk of confusion "
-    "between two characters of the same gender, use their NAME instead of a pronoun. "
-    "If a character's name is NOT known, never write 'the person', 'a person' or 'someone'. "
-    "BURMESE UNNAMED CHARACTER (very important): NEVER write လူတစ်ယောက် (a person), "
-    "လူတစ်ဦး or တစ်ယောက် for a character. Whenever the character's name is not known, use the "
-    "relationship word if the dialogue makes it clear (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, သူဌေး, ဧည့်သည်) "
-    "and attach the character name before it when the name is known (example pattern: the name + ရဲ့ + "
-    "relationship word); if nothing is clear, simply leave the subject out of the sentence "
-    "(Burmese does not need a subject word) and write only the action or the speech. "
-    "If a second unnamed character appears in the same scene, use a role word for that second "
-    "character (ကောင်မလေး young woman or girl, ဦးကြီး older man, အဒေါ်ကြီး older woman, "
-    "ကလေးလေး small child) so the two characters are never mixed up. "
+    "RECAP NARRATOR STYLE (very important): you are a calm Burmese movie/drama recap narrator "
+    "retelling the story to viewers in third person, present tense, using the character names. "
+    "Do NOT use ကျွန်တော်, do NOT use ဗျ, do NOT add your own opinions, jokes or comparisons. "
+    "Just tell what happens, clearly and smoothly, in the order it happens. "
+
+    "ENDINGS: most lines end with ပါတယ်။ (about three lines out of four). Use plain တယ်။ or "
+    "ပါဘူး။ only now and then for variety. Never end with the literary ၏ / သည်။. "
+
+    "CONNECTORS: link the events with natural spoken connectors and vary them: "
+    "အဲ့ဒါနဲ့၊ ဒါပေမဲ့၊ အဲဒီအချိန်မှာပဲ၊ ပြီးတော့၊ အဲ့တော့၊ ဒါကြောင့်၊ နောက်ပိုင်းမှာတော့၊ "
+    "တစ်ဖက်မှာတော့၊ ရုတ်တရက်၊ ဒီအချိန်မှာ. Never use the same connector in two lines in a row. "
+
+    "SPEECH: report what characters say in the narrator's voice, with a variety of verbs: "
+    "လို့ ပြောပါတယ်၊ လို့ မေးပါတယ်၊ လို့ ဖြေပါတယ်၊ လို့ ရှင်းပြပါတယ်၊ လို့ သတိပေးပါတယ်၊ "
+    "လို့ အော်ပါတယ်၊ လို့ ငြင်းပါတယ်. No quotation marks. "
+
+    "NAMES: write every character name in Burmese script (transliterate it), the same way "
+    "every time, and use the name as the subject (ဝါလ်တာက ...၊ လန်စ်က ...). Never leave "
+    "English or Chinese letters in the output. When a name is unknown use a role word "
+    "(အမေ၊ သူငယ်ချင်း၊ သူဌေး၊ ကောင်မလေး၊ ဦးကြီး) or leave the subject out. Never write "
+    "လူတစ်ယောက်. Use သူ only when it is perfectly clear who is meant. "
+
+    "TRANSLATE MEANING: do not translate word by word. Convert idioms and slang into natural "
+    "spoken Burmese. Mention the emotion when the scene shows it (စိတ်တိုတိုနဲ့၊ ဝမ်းသာသွားပြီး၊ "
+    "အံ့ဩသွားပြီး). "
+
+    "SENTENCES: keep them short to medium, one idea each, with a comma-type ၊ at breath points "
+    "and ။ at the end. Write clean Burmese with normal spacing between phrases. "
+
+    "STYLE EXAMPLES (copy the TONE only, never the content): "
+    "'ဝိုင်းလ်ဒါဆိုတဲ့ ကောင်လေးက ငယ်ငယ်ထဲကတည်းက ဉာဏ်ကောင်းတဲ့ ကလေးတစ်ယောက် ဖြစ်ပါတယ်။' "
+    "'ဒါပေမဲ့ တစ်ယောက်တည်းပဲ လှုပ်ရှားတတ်တဲ့ လန်စ်က အဖွဲ့တွေကို မခေါ်ဘဲ တစ်ယောက်တည်း ဝင်သွားပါတယ်။' "
+    "'စိတ်တိုသွားတဲ့ လန်စ်က ဖြေဆေးပေးဖို့ တောင်းပေမယ့် ဖြေဆေးက မရှိသေးပါဘူး။' "
+    "'အဲဒီအချိန်မှာပဲ မာစီနဲ့ သူ့အဖွဲ့တွေ ရောက်လာတာကြောင့် သူတို့နှစ်ယောက် ထွက်ပြေးကြပါတယ်။' "
+    "'ကမ္ဘာပေါ်မှာ လူဆိုး လူကောင်းဆိုတာ မရှိဘူး၊ လူက လူပဲလို့ ဝါလ်တာက ပြောပါတယ်။' "
+
+    "NUMBERS: write numbers as Burmese words (၇၀ → ခုနစ်ဆယ်). "
 )
 
 # ---- German specific (human, spoken, NOT translated-sounding) -----------
@@ -247,41 +257,21 @@ LANG_CONF = {
         ],
         "sentence_end": r"(?<=။)",
         "prompt": (
-            "You are a Burmese (Myanmar) recap-video narrator. Translate every numbered line "
-            "below into natural spoken Burmese narration (storyteller style). "
+            "You are a Burmese (Myanmar) movie/drama recap narrator. Translate every numbered "
+            "line below into natural spoken Burmese recap narration (calm third-person storyteller "
+            "style). "
             + _tail(
                 script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
-                accent=("ENDINGS (very important): do NOT end every line with ပါတယ်။. Use the polite "
-                        "ပါတယ် ONLY when it is really needed (a respectful request, a formal "
-                        "statement, or a very polite speaker), at most about one line in five, and "
-                        "never in two lines in a row. Normally end lines with plain spoken endings "
-                        "such as တယ်။ (ဆိုတယ်၊ မေးတယ်၊ ဖြေတယ်၊ ပြန်ပြောတယ်), ခဲ့တယ်။, လိုက်တယ်။, "
-                        "နေတယ်။, တော့တယ်။, ပြီ။, လေ။, ပေါ့။, and vary the ending from line to line. "
-                        "Report speech with a VARIETY of verbs and structures, never the same "
-                        "verb twice in a row and never 'ပြောတယ်' more than once every four lines. "
-
-                        "ဘာသာပြန်တဲ့အခါ အင်္ဂလိပ်စာ၊ တရုတ်စာ ဘာပဲဖြစ်ဖြစ် စကားလုံးတစ်လုံးချင်း "
-                        "တိုက်ရိုက်ဘာသာမပြန်ပါနဲ့။ မူရင်းစာသားရဲ့ အဓိပ္ပာယ်၊ ခံစားချက်နဲ့ "
-                        "ဆိုလိုရင်းကို မြန်မာလို သဘာဝကျကျ ပြန်ပေးပါ။ ဆိုစကား၊ စကားအသုံးအနှုန်းတွေကို "
-                        "မြန်မာလူမျိုး နားလည်လွယ်တဲ့ စကားပြောပုံစံအတိုင်း ပြန်ပေးပါ။ "
-                        "နားမလည်နိုင်တဲ့ စာသားတွေ၊ ဘာသာပြန်ဆိုးနေတဲ့ စာသားတွေ မထွက်ရဘူး။ "
-                        "မြန်မာစကားပြောသလို ချောချောမွေ့မွေ့ ဖတ်ရလွယ်အောင်၊ အဓိပ္ပာယ်ရှိအောင် ရေးပေးပါ။ "
-
-                        "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
-                        "(၏၊ သည်၊ ၍). "
-                        "Use '၊' only at natural breath points inside a long sentence and '။' at the end. "
-                        "Transliterate spoken names into Burmese script the same way every time; "
-                        "when a name is unknown NEVER write လူတစ်ယောက် — "
-                        "use the relationship / role word, or leave the subject out."),
+                accent=("Speak calm, clear, everyday Burmese like a recap narrator. Mostly end lines "
+                        "with ပါတယ်။ Do not translate word by word: translate the meaning and "
+                        "feeling, and turn idioms into natural Burmese. Use '၊' at breath points "
+                        "and '။' at the end."),
                 story=_STORY_MY)
         ),
         "chunk_note": (
-            "Keep character names and role words consistent with the other parts. "
-            "Use pronouns only when it is perfectly clear who is meant, otherwise repeat the name. "
-            "When a name is unknown never write လူတစ်ယောက် — use a role word or leave the subject out. "
-            "Do not end every line with ပါတယ်; use it only when needed. "
-            "Vary the reporting verb — 'ပြောတယ်' at most once every four lines; prefer ဆိုတယ်, "
-            "မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ် and rotate."
+            "Keep the same calm third-person recap voice, the same ending style (mostly ပါတယ်။), "
+            "and the same name spellings as the other parts. Never use ကျွန်တော် or ဗျ. "
+            "When a name is unknown never write လူတစ်ယောက် — use a role word or leave the subject out."
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
         "clean": r"[^\u1000-\u109f\uaa60-\uaa7f\ua9e0-\ua9ff\s0-9.,!?\"'%\-]",
