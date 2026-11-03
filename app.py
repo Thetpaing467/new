@@ -4,9 +4,10 @@ Languages: Burmese (my) / German (de)   ·   Sources: YouTube / TikTok (yt-dlp),
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --lang de --no-split
+       python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 import argparse
 import asyncio
@@ -336,6 +337,12 @@ class Settings:
     voice: str = ""               # empty -> first voice of language
     rate: Optional[int] = None    # Edge speed % · None -> language default (my 45 / de 10)
     tts_workers: int = 8
+    # Audio mix
+    loud_lufs: float = -14.0      # voice loudness target (ပိုကျယ်ချင်ရင် -12)
+    voice_db: float = 0.0         # extra voice gain (dB)
+    bgm: str = ""                 # background music file path
+    bgm_vol: float = 0.25         # BGM volume (0-1)
+    duck: bool = True             # lower BGM automatically while the narrator speaks
     # Video
     height: int = 720
     fps: int = 24
@@ -1162,7 +1169,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
            "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-i", audio,
            "-map", "0:v", "-map", "1:a:0",
            "-c:v", "libx264", "-preset", s.preset, "-crf", "27", "-pix_fmt", "yuv420p",
-           "-threads", "0", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+           "-threads", "0", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
            "-t", f"{total:.3f}", out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_fh)
     th = threading.Thread(target=producer, daemon=True)
@@ -1258,7 +1265,7 @@ def split_video(src, out_prefix, seg_min=2.0, progress=None):
         out = f"{out_prefix}_part{k + 1:02d}.mp4"
         sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-i", src, "-t", f"{dur:.3f}",
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out])
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out])
         outs.append(out)
         if progress:
             progress((k + 1) / n, f"အပိုင်းခွဲနေတယ် {k + 1}/{n}")
@@ -1517,6 +1524,47 @@ def _concat_audio(wd, n):
     return allwav
 
 
+# ---- final audio: loudness boost + optional BGM with sidechain ducking
+_AFMT = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
+
+
+def mix_audio(voice, wd, s, total):
+    """Voice loudnorm (+gain) and, if a BGM file is given, looping BGM that is ducked
+    (sidechaincompress) whenever the narrator speaks. Returns <wd>/mix.wav."""
+    out = os.path.join(wd, "mix.wav")
+    gain = f"loudnorm=I={s.loud_lufs:g}:TP=-1.5:LRA=11,volume={s.voice_db:g}dB"
+    bgm = s.bgm if (s.bgm and os.path.isfile(s.bgm)) else ""
+    if s.bgm and not bgm:
+        log(f"⚠️ BGM ဖိုင် မတွေ့ပါ: {s.bgm} — BGM မပါဘဲ ဆက်သွားမယ်")
+
+    if not bgm:
+        fc = f"[0:a]{_AFMT},{gain},alimiter=limit=0.97[o]"
+        sh(["ffmpeg", "-y", "-i", voice, "-filter_complex", fc, "-map", "[o]",
+            "-t", f"{total:.3f}", "-ar", "44100", "-c:a", "pcm_s16le", out])
+        return out
+
+    bg = f"[1:a]{_AFMT},volume={s.bgm_vol:g},atrim=0:{total:.3f}[bg]"
+
+    def graph(mix_opts, tail):
+        if s.duck:
+            return (f"[0:a]{_AFMT},{gain},asplit=2[v][sc];{bg};"
+                    f"[bg][sc]sidechaincompress=threshold=0.02:ratio=10:attack=30:release=600[d];"
+                    f"[v][d]amix=inputs=2:duration=first:dropout_transition=0{mix_opts}{tail}[o]")
+        return (f"[0:a]{_AFMT},{gain}[v];{bg};"
+                f"[v][bg]amix=inputs=2:duration=first:dropout_transition=0{mix_opts}{tail}[o]")
+
+    def run(fc):
+        sh(["ffmpeg", "-y", "-i", voice, "-stream_loop", "-1", "-i", bgm,
+            "-filter_complex", fc, "-map", "[o]", "-t", f"{total:.3f}",
+            "-ar", "44100", "-c:a", "pcm_s16le", out])
+
+    try:
+        run(graph(":normalize=0", ",alimiter=limit=0.97"))
+    except RuntimeError:      # ffmpeg < 4.4 has no amix normalize option
+        run(graph("", ",volume=2,alimiter=limit=0.97"))
+    return out
+
+
 def _build_plan(units, durs, vdur, max_speed):
     n = len(units)
     bounds = [0.0] + [(units[i]["end"] + units[i + 1]["start"]) / 2
@@ -1583,7 +1631,11 @@ def run_render(proj, s, proxy=None, progress=None):
     subs = _build_subs(my_list, durs, lang) if (s.sub and font) else []
 
     t_a = time.time()
-    render_final(proj.video, allwav, proj.final, plan, total, s, subs, font,
+    mixed = mix_audio(allwav, proj.path, s, total)
+    T["audio mix"] = time.time() - t_a
+
+    t_a = time.time()
+    render_final(proj.video, mixed, proj.final, plan, total, s, subs, font,
                  is_mm=conf["is_mm"], progress=progress.sub(0.3, 1.0))
     T["render"] = time.time() - t_a
     T["total (stage 2)"] = time.time() - t_all
@@ -1607,6 +1659,14 @@ def add_style_args(p):
     g.add_argument("--rate", type=int, default=SUP,
                    help="Edge speed %% (-50..100) · default: my 45 / de 10")
     g.add_argument("--workers", dest="tts_workers", type=int, default=SUP, help="parallel TTS jobs")
+    g = p.add_argument_group("audio mix")
+    g.add_argument("--loud", dest="loud_lufs", type=float, default=SUP,
+                   help="voice loudness LUFS (default -14, ပိုကျယ်ချင်ရင် -12)")
+    g.add_argument("--voice-db", type=float, default=SUP, help="voice extra gain dB (default 0)")
+    g.add_argument("--bgm", default=SUP, help="background music file (mp3/wav/m4a...)")
+    g.add_argument("--bgm-vol", type=float, default=SUP, help="BGM volume 0-1 (default 0.25)")
+    g.add_argument("--no-duck", dest="duck", action="store_false", default=SUP,
+                   help="BGM ducking ပိတ်")
     g = p.add_argument_group("video")
     g.add_argument("--height", type=int, choices=[360, 480, 720, 1080], default=SUP)
     g.add_argument("--fps", type=int, choices=[20, 24, 25, 30], default=SUP)
@@ -1655,6 +1715,9 @@ def settings_for(proj, args):
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.split_min = max(0.0, float(s.split_min))
+    s.bgm_vol = max(0.0, min(1.0, float(s.bgm_vol)))
+    s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
+    s.loud_lufs = max(-24.0, min(-8.0, float(s.loud_lufs)))
     if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -2066,6 +2129,7 @@ def launch_ui():
 
     # ---------------- step 2 (tts + render + split)
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
+              bgm_file, bgm_vol, voice_db, duck,
               height, fps, preset, max_speed, crop, flip, zoom,
               sub, sub_size, sub_pos, neon, sweep, split_on, split_min,
               progress=gr.Progress()):
@@ -2084,6 +2148,8 @@ def launch_ui():
             s.lang = code
             s.voice = voice if voice in voices_for(code) else ""
             s.rate, s.tts_workers = int(rate), int(workers)
+            s.bgm, s.bgm_vol = _path(bgm_file), max(0.0, min(1.0, float(bgm_vol)))
+            s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
             s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
@@ -2153,8 +2219,8 @@ def launch_ui():
 
     # ---------------- layout
     with gr.Blocks(**blocks_kw) as demo:
-        gr.Markdown("# 🎙️ Recap → Burmese / German  `build 18`\n"
-                    "Whisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS → Smart Sync → စာတန်း + Neon → ✂️ အပိုင်းခွဲ (ON/OFF)")
+        gr.Markdown("# 🎙️ Recap → Burmese / German  `build 19`\n"
+                    "Whisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS → Smart Sync → စာတန်း + Neon → 🎵 BGM ducking → ✂️ အပိုင်းခွဲ (ON/OFF)")
         pdir_state = gr.State("")
 
         height = gr.State(720)
@@ -2175,6 +2241,15 @@ def launch_ui():
                                  label="Edge speed % (ဘာသာစကားပြောင်းရင် အလိုအလျောက် ချိန်မယ်)")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
             lang.change(on_lang_change, lang, [voice, rate])
+
+        with gr.Accordion("🎵 Background music + Voice အသံ", open=False):
+            bgm_file = gr.File(label="🎵 Background music (optional · mp3/wav/m4a/ogg)",
+                               type="filepath",
+                               file_types=[".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"])
+            with gr.Row():
+                bgm_vol = gr.Slider(0.0, 1.0, value=0.25, step=0.05, label="BGM အသံ")
+                voice_db = gr.Slider(-6, 12, value=0, step=1, label="Voice အပို gain (dB)")
+                duck = gr.Checkbox(True, label="🦆 Ducking (စကားပြောရင် BGM ချ)")
 
         gr.Markdown("### 📥 Video")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
@@ -2257,6 +2332,7 @@ def launch_ui():
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
+                         bgm_file, bgm_vol, voice_db, duck,
                          height, fps, preset, max_speed, crop, flip, zoom,
                          sub, sub_size, sub_pos, neon, sweep, split_on, split_min],
                  [video, dl, status2])
