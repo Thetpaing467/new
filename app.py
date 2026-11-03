@@ -1,23 +1,46 @@
-"""Recap CLI (single file): Whisper -> Gemini (manual) -> TTS -> smart-sync render -> auto split.
+"""Recap CLI (slim): Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render -> auto split.
+
+Languages: Burmese (my) / German (de)   ·   Sources: YouTube / TikTok (yt-dlp), Rednote, local file
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
+       python recap.py run <video|url> -d work/ep1 --lang de --no-split
+       python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.7.0"
+__version__ = "1.9.0"
+
+import argparse
+import asyncio
+import glob
+import hashlib
+import inspect
+import json
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+import wave
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, asdict, fields
+from typing import Optional
+from urllib.parse import urlparse
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont, features
 
 # ======================================================================
 # config
 # ======================================================================
-"""Constants, language table and render/TTS settings."""
-from dataclasses import dataclass, asdict, fields
-
-# Whisper segment merge targets (seconds)
-TARGET, MAXD = 4.2, 5.6
-
-# Subtitle box always has this many text lines (fixed size, never grows/shrinks)
-SUB_LINES = 2
-
-# Preview scrub range (seconds)
-PREVIEW_SECS = 5.0
+TARGET, MAXD = 4.2, 5.6          # Whisper segment merge targets (seconds)
+SUB_LINES = 2                    # subtitle box always has this many text lines
+PREVIEW_SECS = 5.0               # preview scrub range (seconds)
+CHUNK = 50                       # lines per Gemini prompt part
 
 # Trim leading/trailing silence from each TTS clip, then pad 0.2s
 TRIM = (
@@ -25,14 +48,10 @@ TRIM = (
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,apad=pad_dur=0.2"
 )
 
-VOX_SPACES = [
-    {"space": "openbmb/VoxCPM-Demo", "type": "demo"},
-    {"space": "hgghfhjfhjguyjf/Voxcpm-Burmese-Tts", "type": "burmese"},
-]
-
-VIDEO_EXT = (".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".flv")
-
-# Human-like narration rules (added to every language prompt).
+# ----------------------------------------------------------------------
+# Prompt building blocks
+# ----------------------------------------------------------------------
+# {accent} is replaced with a language specific hint (plain str.replace, no .format()).
 _HUMAN = (
     "VOICE STYLE (very important): the result will be read aloud by a speech engine, so it must "
     "sound like a real human storyteller talking to a friend, NOT a robot reading text. "
@@ -44,93 +63,87 @@ _HUMAN = (
     "Do NOT use ellipsis (...), emoji, brackets, asterisks or stage directions. "
 )
 
-# Third-person drama-recap style (dialogue is retold as reported speech).
-_STORY = (
+# Language-neutral drama-recap rules (shared by every language).
+_STORY_CORE = (
     "NARRATION STYLE (drama-recap, third person): the source lines are raw speech-to-text of "
     "characters TALKING. Do NOT translate them as direct dialogue and do NOT use quotation marks. "
     "Retell them as a narrator who watched the scene: turn what a character says into reported "
-    "speech, for example 'Xiao Li said that ...', 'Xiao Li asked Mother ...', "
-    "'Mother firmly replied that ...', 'Boss Wang told Xiao Li ...'. "
-    "Work out who is speaking and who is being spoken to from context "
-    "(mother, father, boss, neighbour and so on) and use the character names or relationship words. "
-    "Turn first-person and second-person speech into third person. "
-    "Keep the narrator calm and clear, like someone summarising a TV drama episode to a friend. "
-    "Each output line is ONE complete narrated sentence, medium to long length, that flows "
-    "naturally like a real story. Link actions with natural connectors (then, so, but, after that). "
+    "speech (who said what to whom). Work out who is speaking and who is being spoken to from "
+    "context (mother, father, boss, neighbour and so on) and use the character names or "
+    "relationship words. Turn first-person and second-person speech into third person. "
+    "Keep the narrator calm, warm and clear, like someone summarising a TV drama episode to a "
+    "friend. Each output line is ONE narrated passage that flows naturally like a real story; "
+    "link actions with natural connectors. "
 
-    # --- Natural Translation Rule ---
-    "NATURAL TRANSLATION (very important): The source language can be English, Chinese, or any "
+    "NATURAL TRANSLATION (very important): the source language can be English, Chinese, or any "
     "other language. DO NOT translate word-by-word or literally. Translate the MEANING, "
-    "INTENTION, and EMOTION, not just the words. Idioms, slang, proverbs, and cultural references "
-    "must be converted into their closest natural Burmese equivalent. If there is no direct "
-    "equivalent, rewrite the sentence so a native Burmese speaker immediately understands the "
-    "situation. The final Burmese must sound like everyday spoken Burmese — smooth, clear, and "
-    "meaningful — not like a machine or a textbook. If a translated line sounds confusing, "
-    "unnatural, or meaningless, REWRITE it until it sounds natural in Burmese. "
+    "INTENTION and EMOTION, not just the words. Idioms, slang, proverbs and cultural references "
+    "must be converted into their closest natural equivalent in the target language. If there is "
+    "no direct equivalent, rewrite the sentence so a native speaker immediately understands the "
+    "situation. The result must sound like everyday spoken language, not like a machine, a "
+    "dictionary or a textbook. If a translated line sounds confusing, unnatural or meaningless, "
+    "REWRITE it until it sounds natural. "
 
-    # --- (5) Inner Thoughts & Motives ---
-    "INNER THOUGHTS & MOTIVES: Do not just state what happened. Describe HOW it happened and WHY. "
-    "Add the emotion and the tone of the character (e.g., 'angrily shouted', 'whispered with tears', "
-    "'smiled coldly'). Make the listener feel the scene like they are watching a movie. "
+    "INNER THOUGHTS & MOTIVES: do not just state what happened, show HOW it happened. Add the "
+    "emotion and tone of the character when the scene makes it clear (angrily shouted, whispered "
+    "with tears, smiled coldly). Make the listener feel the scene like a movie. "
 
-    # --- (6) Smooth Transitions ---
-    "SMOOTH TRANSITIONS: Use varied transition words to connect scenes (e.g., 'at that moment', "
-    "'meanwhile', 'suddenly', 'but then'). Avoid repeating the same connector (like 'then' or 'and') "
-    "over and over. Make the story flow naturally from one event to the next. "
+    "SMOOTH TRANSITIONS: use varied transition words to connect scenes (at that moment, "
+    "meanwhile, suddenly, but then). Never repeat the same connector or the same sentence "
+    "opening in consecutive lines. "
 
-    # --- (7) Highlight Plot Twists ---
-    "HIGHLIGHT PLOT TWISTS: When there is a surprising turn or a twist in the story, emphasize it. "
-    "Use dramatic phrasing to make the listener feel the shock (e.g., 'but the truth was...', "
-    "'at that moment, a shocking event happened...'). "
+    "HIGHLIGHT PLOT TWISTS: when there is a surprising turn in the story, emphasize it with "
+    "dramatic but natural phrasing so the listener feels the shock. "
 
-    # --- (9) Voice Tone & Pitch ---
-    "VOICE TONE & PITCH: Write sentences that naturally convey the character's emotion through "
-    "the words. For questions, use phrasing that sounds like a real question. For shock or surprise, "
-    "use phrasing that sounds astonished (e.g., 'What? How did you know?'). "
+    "VOICE TONE & PITCH: let the words themselves carry the character's emotion. A question "
+    "should sound like a real question, shock should sound astonished, anger should sound sharp. "
 
-    # --- (11) Sentence Segmentation for TTS ---
-    "SENTENCE SEGMENTATION: Keep sentences short and punchy. Do NOT write long, complex sentences. "
-    "Break long thoughts into 2 or 3 short sentences so the TTS engine can read them with natural "
-    "pauses and intonation. (e.g., 'Mike came home. It was raining. But the door was open.') "
+    "SENTENCE SEGMENTATION: keep sentences short and punchy. Break long thoughts into two or "
+    "three short sentences so the speech engine can read them with natural pauses and "
+    "intonation. "
 
-    # --- (14) Numbers & Symbols to Words ---
-    "NUMBERS & SYMBOLS: Always write numbers and symbols as spoken words in the target language "
-    "(e.g., '1 billion' -> 'တစ်ဘီလီယံ', '50%' -> 'ငါးဆယ်ရာခိုင်နှုန်း', '$100' -> 'ဒေါ်လာတစ်ရာ'). "
-    "This helps the TTS engine read them naturally. "
+    "NUMBERS & SYMBOLS: always write numbers, percentages, currencies and symbols as spoken "
+    "words in the target language, so the speech engine reads them naturally. "
 
-    # --- (16) Relationship Dynamics ---
-    "RELATIONSHIP DYNAMICS: Clearly state the relationship between characters when it matters "
-    "(e.g., 'Mike's boss, Jake...', 'Mike's ex-girlfriend, Mary...'). This helps the listener "
-    "keep track of who is who and how they are connected. "
+    "RELATIONSHIP DYNAMICS: state the relationship between characters when it matters "
+    "(Mike's boss Jake, Mike's ex-girlfriend Mary) so the listener keeps track of who is who. "
 
-    # --- (17) Emphasis on Key Points ---
-    "EMPHASIS ON KEY POINTS: Use strong, clear language for the most important moments of the story "
-    "(e.g., the lottery win, the big fight). Make those moments stand out so the listener remembers them. "
+    "EMPHASIS ON KEY POINTS: use strong, clear language for the most important moments "
+    "(the big win, the big fight) so the listener remembers them. "
 
-    # --- (18) Context & Background ---
-    "CONTEXT & BACKGROUND: If the listener needs background information to understand the scene, "
-    "add it naturally (e.g., 'This story started 5 years ago...', 'Their relationship had changed "
-    "since that day...'). Do NOT leave the listener confused. "
+    "CONTEXT & BACKGROUND: if the listener needs background to understand a scene, add it "
+    "briefly and naturally, but only from what the source lines make clear. "
 
-    "Keep insults, jokes, arguments and emotions of the original, but report them rather than act "
-    "them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not in the "
-    "source lines. Do NOT address the audience. "
+    "Keep insults, jokes, arguments and emotions of the original, but report them rather than "
+    "act them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not "
+    "in the source lines. Do NOT address the audience. "
+
+    "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
+    "name for the character and spell it the same way every time. "
+    "Speech-to-text often misspells names: if two similar-sounding names appear, treat them as "
+    "the same person and use one spelling throughout. "
+)
+
+# ---- Burmese specific --------------------------------------------------
+_STORY_MY = (
+    "Examples of reported speech: 'Xiao Li said that ...', 'Xiao Li asked Mother ...', "
+    "'Mother firmly replied that ...', 'Boss Wang told Xiao Li ...'. "
+    "The final Burmese must sound like everyday spoken Burmese — smooth, clear and meaningful. "
+    "Idioms, slang, proverbs and cultural references must become their closest natural Burmese "
+    "equivalent. "
+    "NUMBERS & SYMBOLS (Burmese): '1 billion' -> 'တစ်ဘီလီယံ', '50%' -> 'ငါးဆယ်ရာခိုင်နှုန်း', "
+    "'$100' -> 'ဒေါ်လာတစ်ရာ'. "
     "REPORTING VERB VARIETY (very important): NEVER repeat the same reporting verb in two "
     "consecutive lines. Rotate through the whole vocabulary of reporting and reaction verbs that "
     "fit the scene — for Burmese prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ်, "
     "ညည်းတယ်, သတိပေးတယ်, တိုက်တွန်းတယ်, ကတိပေးတယ်, ငြင်းတယ်, ဝန်ခံတယ်, ရယ်တယ်, ခြိမ်းခြောက်တယ်. "
     "The generic Burmese verb 'ပြောတယ်' may appear at most ONCE every four lines. "
-
-    # --- Natural Pronoun Rule ---
-    "PRONOUNS: You may use natural Burmese pronouns like သူ (he/she), သူ့ (his/her), သူမ (she), "
+    "PRONOUNS: you may use natural Burmese pronouns like သူ (he/she), သူ့ (his/her), သူမ (she), "
     "သူတို့ (they), ကျွန်တော် (I, male), ကျွန်မ (I, female) when it sounds natural in the context "
     "and helps the story flow smoothly. Do NOT overuse them to the point of confusion. Always make "
     "sure the reader clearly understands WHO is being referred to. If there is a risk of confusion "
     "between two characters of the same gender, use their NAME instead of a pronoun. "
-
-    "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
-    "name for the character and spell it the same way every time. If the name is NOT known, "
-    "never write 'the person', 'a person' or 'someone'. "
+    "If a character's name is NOT known, never write 'the person', 'a person' or 'someone'. "
     "BURMESE UNNAMED CHARACTER (very important): NEVER write လူတစ်ယောက် (a person), "
     "လူတစ်ဦး or တစ်ယောက် for a character. Whenever the character's name is not known, use the "
     "relationship word if the dialogue makes it clear (အမေ, အဖေ, အမျိုးသမီး, သူငယ်ချင်း, သူဌေး, ဧည့်သည်) "
@@ -140,26 +153,94 @@ _STORY = (
     "If a second unnamed character appears in the same scene, use a role word for that second "
     "character (ကောင်မလေး young woman or girl, ဦးကြီး older man, အဒေါ်ကြီး older woman, "
     "ကလေးလေး small child) so the two characters are never mixed up. "
-    "For other languages, when the name is unknown, call the character by a simple role or "
-    "look-based word chosen from age and gender and keep the same word for the same person "
-    "(German: der junge Mann, die junge Frau, der alte Mann, die ältere Frau; "
-    "Japanese: 青年, 少女, 老人, おばさん). "
-    "Speech-to-text often misspells names: if two similar-sounding names appear, treat them as "
-    "the same person and use one spelling throughout. "
 )
 
-_PROMPT_TAIL = (
-    "Rules: do NOT summarize, shorten or skip; do NOT move content between lines; "
-    "keep character names consistent across all lines; {script} " + _HUMAN + _STORY +
-    "Output exactly one line per input line in the format [number] {name} text "
-    "-- same numbers, no extra comments.\n\n"
+# ---- German specific (human, spoken, NOT translated-sounding) -----------
+_STORY_DE = (
+    "GERMAN STORYTELLER VOICE (very important): write like a real German person who tells a "
+    "friend over coffee what happened in a series. It must NOT sound like a translation, a "
+    "newspaper article, a school essay or a subtitle file. "
+
+    "TENSE: tell the whole recap in the present tense (Präsens), the way people retell a film: "
+    "'Xiao Li kommt nach Hause und sieht, dass die Tür offen steht.' Use Perfekt or Plusquamperfekt "
+    "only for things that happened earlier ('Das hatte sie ihm schon vor Jahren versprochen.'). "
+    "Do not use the literary Präteritum for narration ('erwiderte er', 'entgegnete sie'). "
+
+    "REPORTED SPEECH, THE SPOKEN WAY: use a normal 'dass' clause or a plain main clause: "
+    "'Sie sagt, dass sie keine Lust mehr hat.' or 'Sie sagt, sie hat keine Lust mehr.' "
+    "NEVER use the stiff Konjunktiv I ('sie habe', 'er sei', 'sie wolle') — nobody speaks like that. "
+
+    "REPORTING VERBS (very important): never the same reporting verb in two consecutive lines, "
+    "and 'sagt' at most once every four lines. Rotate: fragt, antwortet, erklärt, meint, "
+    "erwidert, ruft, schreit, flüstert, warnt, verspricht, streitet ab, gibt zu, lacht, droht, "
+    "bittet, murmelt, fährt sie an, hakt nach. When the action already shows it, drop the "
+    "reporting verb and just state what the person does. "
+
+    "SPOKEN GERMAN FEEL: use everyday words and, sparingly, modal particles where they really fit "
+    "(doch, ja, halt, eben, mal, schon, eigentlich, denn, ausgerechnet) — not in every line. "
+    "Contractions like 'ist's', 'gibt's', 'hat's' are fine. "
+    "Prefer lively verbs to noun phrases: NOT 'Er führt ein Gespräch mit ihr' but 'Sie reden "
+    "miteinander'; NOT 'Sie trifft die Entscheidung zu gehen' but 'Sie beschließt zu gehen'. "
+    "No office German (Behördendeutsch), no Nominalstil, no 'bezüglich', 'diesbezüglich', "
+    "'hinsichtlich', 'jedoch' in every line. "
+
+    "SENTENCE VARIETY: mix short lines ('Die Tür ist offen.') with medium ones. Do not start "
+    "every sentence with the character's name; sometimes start with a time or place "
+    "('Am nächsten Morgen ...', 'Kurz darauf ...', 'Draußen im Flur ...'). Do not start more "
+    "than two lines in a row with the same word. Keep the verb in second position and avoid long "
+    "nested sentences (Schachtelsätze). "
+
+    "CONNECTORS: vary them — und dann, aber, plötzlich, kurz darauf, währenddessen, trotzdem, "
+    "dabei, ausgerechnet, kaum ist sie da, inzwischen, auf einmal, nur leider. "
+
+    "IDIOMS: never translate Chinese or English idioms literally. Replace them with a German "
+    "expression that people really say, or just say plainly what is meant. "
+
+    "PRONOUNS: use er, sie, ihm, ihr, ihnen naturally so the text flows and does not repeat "
+    "names all the time. If two characters of the same gender are in the scene, use the name or "
+    "a role word (die Mutter, der Chef) instead, so nobody gets mixed up. "
+
+    "NAMES: keep Chinese and other Asian names in their Latin / Pinyin spelling, exactly the same "
+    "every time, never translate them. If a name is not known, never write 'die Person', "
+    "'jemand' or 'eine Person'. Use a simple role word from the context (die Mutter, der Vater, "
+    "der Chef, die Nachbarin, die Freundin) or a look-based word: der junge Mann, die junge "
+    "Frau, der alte Mann, die ältere Frau, das kleine Mädchen — and keep the same word for the "
+    "same person. "
+
+    "NUMBERS & SYMBOLS (German): write everything as words, never digits or symbols: "
+    "'50%' -> 'fünfzig Prozent', '100 Dollar' -> 'hundert Dollar', '3 Uhr' -> 'drei Uhr', "
+    "'2019' -> 'zweitausendneunzehn', '1,5 Millionen' -> 'eineinhalb Millionen'. "
+    "No abbreviations: 'zum Beispiel' instead of 'z. B.', 'und so weiter' instead of 'usw.'. "
+
+    "EMOTION: show feelings through word choice and rhythm: 'Sie schreit ihn an', 'er flüstert "
+    "mit Tränen in den Augen', 'sie lächelt kalt', 'er traut seinen Ohren nicht'. A question a "
+    "character asks should come across as a real question: 'Sie fragt ihn, woher er das "
+    "überhaupt weiß.' "
+
+    "FINAL SELF-CHECK for every line: imagine reading it aloud to a friend. If it sounds like a "
+    "translation, a textbook or a robot, rewrite it in the way a native German would really "
+    "say it. "
 )
+
+
+def _tail(script, accent, story):
+    """Common prompt tail. Built with plain concatenation (no str.format) so braces are safe."""
+    return (
+        "Rules: do NOT summarize, shorten or skip; do NOT move content between lines; "
+        "keep character names consistent across all lines; " + script + " "
+        + _HUMAN.replace("{accent}", accent) + _STORY_CORE + story +
+        "Output exactly one line per input line in the format [number] text "
+        "-- same numbers, same count, no extra comments, no headings, no blank lines, "
+        "no language label.\n\n"
+    )
+
 
 LANG_CONF = {
     "my": {
         "name": "Burmese",
         "label": "မြန်မာ",
         "sample": "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။",
+        "rate": 45,
         "edge_voices": [
             ("my-MM-ThihaNeural", "Thiha (male)"),
             ("my-MM-NilarNeural", "Nilar (female)"),
@@ -168,7 +249,7 @@ LANG_CONF = {
         "prompt": (
             "You are a Burmese (Myanmar) recap-video narrator. Translate every numbered line "
             "below into natural spoken Burmese narration (storyteller style). "
-            + _PROMPT_TAIL.format(
+            + _tail(
                 script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
                 accent=("ENDINGS (very important): do NOT end every line with ပါတယ်။. Use the polite "
                         "ပါတယ် ONLY when it is really needed (a respectful request, a formal "
@@ -179,14 +260,12 @@ LANG_CONF = {
                         "Report speech with a VARIETY of verbs and structures, never the same "
                         "verb twice in a row and never 'ပြောတယ်' more than once every four lines. "
 
-                        # --- Natural Translation Rule for Burmese ---
                         "ဘာသာပြန်တဲ့အခါ အင်္ဂလိပ်စာ၊ တရုတ်စာ ဘာပဲဖြစ်ဖြစ် စကားလုံးတစ်လုံးချင်း "
                         "တိုက်ရိုက်ဘာသာမပြန်ပါနဲ့။ မူရင်းစာသားရဲ့ အဓိပ္ပာယ်၊ ခံစားချက်နဲ့ "
                         "ဆိုလိုရင်းကို မြန်မာလို သဘာဝကျကျ ပြန်ပေးပါ။ ဆိုစကား၊ စကားအသုံးအနှုန်းတွေကို "
                         "မြန်မာလူမျိုး နားလည်လွယ်တဲ့ စကားပြောပုံစံအတိုင်း ပြန်ပေးပါ။ "
                         "နားမလည်နိုင်တဲ့ စာသားတွေ၊ ဘာသာပြန်ဆိုးနေတဲ့ စာသားတွေ မထွက်ရဘူး။ "
                         "မြန်မာစကားပြောသလို ချောချောမွေ့မွေ့ ဖတ်ရလွယ်အောင်၊ အဓိပ္ပာယ်ရှိအောင် ရေးပေးပါ။ "
-                        # ------------------------------------------
 
                         "Use spoken Burmese (တယ်၊ တော့၊ ပေါ့၊ လေ) instead of literary endings "
                         "(၏၊ သည်၊ ၍). "
@@ -194,7 +273,15 @@ LANG_CONF = {
                         "Transliterate spoken names into Burmese script the same way every time; "
                         "when a name is unknown NEVER write လူတစ်ယောက် — "
                         "use the relationship / role word, or leave the subject out."),
-                name="Burmese")
+                story=_STORY_MY)
+        ),
+        "chunk_note": (
+            "Keep character names and role words consistent with the other parts. "
+            "Use pronouns only when it is perfectly clear who is meant, otherwise repeat the name. "
+            "When a name is unknown never write လူတစ်ယောက် — use a role word or leave the subject out. "
+            "Do not end every line with ပါတယ်; use it only when needed. "
+            "Vary the reporting verb — 'ပြောတယ်' at most once every four lines; prefer ဆိုတယ်, "
+            "မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ် and rotate."
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
         "clean": r"[^\u1000-\u109f\uaa60-\uaa7f\ua9e0-\ua9ff\s0-9.,!?\"'%\-]",
@@ -204,6 +291,7 @@ LANG_CONF = {
         "name": "German",
         "label": "ဂျာမနီ",
         "sample": "Dies ist ein Beispiel-Untertitel.",
+        "rate": 10,
         "edge_voices": [
             ("de-DE-KatjaNeural", "Katja (female)"),
             ("de-DE-ConradNeural", "Conrad (male)"),
@@ -212,57 +300,25 @@ LANG_CONF = {
         ],
         "sentence_end": r"(?<=[.!?])\s+",
         "prompt": (
-            "You are a German (Deutsch) recap-video narrator. Translate every numbered line "
-            "below into natural spoken German narration (storyteller style). "
-            + _PROMPT_TAIL.format(
+            "You are a native German (Deutsch) storyteller who retells TV dramas to friends in a "
+            "recap video. Rewrite every numbered line below as natural, relaxed, spoken German — "
+            "the way a real person would tell it, not a translation. "
+            + _tail(
                 script="use ONLY German (Latin script), no Chinese letters.",
-                accent=("Use relaxed spoken German (contractions like 'ist's', 'gibt's' are fine, "
-                        "connectors like 'und dann', 'plötzlich', 'also', 'aber') and put a comma "
-                        "at every natural breath point. "
-                        "Vary the reporting verb: never the same verb twice in a row, and never "
-                        "'sagte' more than once every four lines — rotate sagte, fragte, antwortete, "
-                        "erklärte, erwiderte, rief, flüsterte, warnte, versprach, leugnete, gab zu, "
-                        "lachte, drohte, bat. When the action already shows it, you may drop the "
-                        "reporting verb and state the action."),
-                name="German")
+                accent=("Speak relaxed, everyday German as in a chat with a friend: contractions "
+                        "like 'ist's', 'gibt's', 'hat's' are fine, and put a comma at every "
+                        "natural breath point."),
+                story=_STORY_DE)
+        ),
+        "chunk_note": (
+            "Keep character names, their spelling and role words exactly the same as in the other "
+            "parts. Keep the same tense (Präsens) and the same relaxed spoken German tone as in "
+            "all other parts. Never use Konjunktiv I. Vary reporting verbs and sentence openings; "
+            "'sagt' at most once every four lines. Use er/sie naturally, but use the name when two "
+            "characters of the same gender are in the scene."
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
         "clean": r"[^A-Za-zÄÖÜäöüß0-9\s.,!?\"'%\-]",
-        "is_mm": False,
-    },
-    "ja": {
-        "name": "Japanese",
-        "label": "ဂျပန်",
-        "sample": "これはサンプルの字幕です。",
-        "edge_voices": [
-            ("ja-JP-NanamiNeural", "Nanami (female)"),
-            ("ja-JP-KeitaNeural", "Keita (male)"),
-            ("ja-JP-AoiNeural", "Aoi (female)"),
-            ("ja-JP-DaichiNeural", "Daichi (male)"),
-            ("ja-JP-MayuNeural", "Mayu (female)"),
-            ("ja-JP-NaokiNeural", "Naoki (male)"),
-            ("ja-JP-ShioriNeural", "Shiori (female)"),
-        ],
-        "sentence_end": r"(?<=[。！？!?])",
-        "prompt": (
-            "You are a Japanese (日本語) recap-video narrator. Translate every numbered line "
-            "below into natural spoken Japanese narration (storyteller style). "
-            + _PROMPT_TAIL.format(
-                script="use ONLY Japanese (Kanji, Hiragana, Katakana), no English/Chinese "
-                       "letters except kanji.",
-                accent=("Use a warm, natural spoken storyteller tone (mix だ/だった and です/ました "
-                        "naturally, with softeners like でも、そして、すると). Use '、' at every "
-                        "breath point and '。' to end a sentence. "
-                        "Vary the reporting verb: never the same verb twice in a row, and never "
-                        "'言った' more than once every four lines — rotate 言った, 尋ねた, 答えた, "
-                        "説明した, 返した, 叫んだ, 囁いた, 警告した, 約束した, 否定した, 認めた, "
-                        "笑った, 脅した, 頼んだ. When the action already shows it, you may drop "
-                        "the reporting verb and state the action."),
-                name="Japanese")
-        ),
-        "font_keys": ("notosanscjk", "notosansjp", "notosansjapanese", "takao", "ipag",
-                      "vl-gothic", "msgothic", "cjk"),
-        "clean": r"[^\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff\uff00-\uffef0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
 }
@@ -280,19 +336,16 @@ def resolve_lang(value):
         return LANG_ALIASES[v]
     if v.lower() in LANG_ALIASES:
         return LANG_ALIASES[v.lower()]
-    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de / ja)")
+    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de)")
 
 
 @dataclass
 class Settings:
-    # TTS
+    # TTS (Edge only)
     lang: str = "my"
-    engine: str = "edge"          # edge | vox
     voice: str = ""               # empty -> first voice of language
-    rate: int = 45                # Edge speed %
+    rate: Optional[int] = None    # Edge speed % · None -> language default (my 45 / de 10)
     tts_workers: int = 8
-    vox_retry: int = 4
-    vox_ref: str = ""             # reference audio path for VoxCPM
     # Video
     height: int = 720
     fps: int = 24
@@ -301,8 +354,9 @@ class Settings:
     crop: bool = True             # auto-remove black bars
     flip: bool = True             # mirror horizontally
     zoom: float = 1.0
-    # Split (download အပိုင်းခွဲ)
-    split_min: float = 2.0        # minutes per part · 0 = မခွဲဘူး
+    # Split
+    split: bool = True            # ON / OFF switch for splitting
+    split_min: float = 2.0        # minutes per part
     # Subtitles
     sub: bool = True
     sub_size: float = 7.0         # % of width
@@ -313,7 +367,7 @@ class Settings:
     # Neon
     neon: bool = True
     neon_th: int = 3
-    neon_speed: float = 0.15      # laps per second (0.15 -> ~6.7s per lap)
+    neon_speed: float = 0.15      # laps per second
 
     def to_dict(self):
         return asdict(self)
@@ -324,28 +378,20 @@ class Settings:
         return cls(**{k: v for k, v in (d or {}).items() if k in names})
 
     def resolved_voice(self):
-        if self.voice:
-            return self.voice
-        return LANG_CONF[self.lang]["edge_voices"][0][0]
+        return self.voice or LANG_CONF[self.lang]["edge_voices"][0][0]
+
+    def resolved_rate(self):
+        if self.rate is None:
+            return int(LANG_CONF[self.lang].get("rate", 0))
+        return int(self.rate)
 
     def rate_str(self):
-        return f"{int(self.rate):+d}%"
+        return f"{self.resolved_rate():+d}%"
+
 
 # ======================================================================
 # utils
 # ======================================================================
-"""Small shared helpers."""
-import re
-import subprocess
-import sys
-import time
-import wave
-
-
-class Cancelled(Exception):
-    pass
-
-
 def sh(cmd):
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -369,7 +415,6 @@ def fmt_t(sec):
 
 
 def clean_text(text, lang="my"):
-    # keep only characters of the target language (no pronoun substitution any more)
     return re.sub(LANG_CONF[lang]["clean"], "", text).strip()
 
 
@@ -417,17 +462,10 @@ def timing_table(d):
     w = max(len(k) for k in d) if d else 10
     return "\n".join(f"  {k.ljust(w)}  {fmt_t(v)}" for k, v in d.items())
 
+
 # ======================================================================
-# fonts
+# fonts + subtitle text splitting
 # ======================================================================
-"""Font discovery, text wrapping and subtitle splitting (Burmese / German / Japanese)."""
-import glob
-import os
-import re
-
-from PIL import ImageFont, features
-
-
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -454,7 +492,6 @@ def _globs(base):
 def find_font(lang="my", explicit=""):
     """Order: --font path -> RECAP_FONT env -> repo fonts/ -> system fonts."""
     conf = LANG_CONF[lang]
-
     if explicit and os.path.exists(explicit):
         return explicit
     env_font = os.environ.get("RECAP_FONT", "")
@@ -518,7 +555,7 @@ def get_font(path, size, layout="raqm"):
     return _FONT_CACHE[key]
 
 
-# ---- Burmese syllable splitting -------------------------------------------
+# ---- Burmese syllable splitting
 def _is_start(c):
     return (0x1000 <= c <= 0x1021) or (0x1023 <= c <= 0x1027) or c in (0x1029, 0x102A, 0x103F)
 
@@ -541,17 +578,6 @@ def split_syll(word):
 
 def wrap_text(text, font, maxw, is_mm=False):
     lines, cur = [], ""
-    if not is_mm and " " not in text and any(0x3040 <= ord(c) <= 0x9FFF for c in text):
-        for ch in text:
-            if not cur or font.getlength(cur + ch) <= maxw:
-                cur += ch
-            else:
-                lines.append(cur)
-                cur = ch
-        if cur:
-            lines.append(cur)
-        return lines
-
     for word in text.split():
         pieces = [word] if font.getlength(word) <= maxw else (split_syll(word) if is_mm else list(word))
         for pi, p in enumerate(pieces):
@@ -576,17 +602,6 @@ def split_for_sub(text, mc=36, lang="my"):
         if len(s) <= mc:
             parts.append(s)
             continue
-        if lang == "ja":
-            cur = ""
-            for ch in s:
-                if not cur or len(cur + ch) <= mc:
-                    cur += ch
-                else:
-                    parts.append(cur)
-                    cur = ch
-            if cur:
-                parts.append(cur)
-            continue
         cur = ""
         for word in s.split():
             pieces = [word] if len(word) <= mc else (split_syll(word) if is_mm else list(word))
@@ -601,15 +616,10 @@ def split_for_sub(text, mc=36, lang="my"):
             parts.append(cur)
     return parts or [text]
 
-# ======================================================================
-# overlay
-# ======================================================================
-"""Subtitle overlay (PNG-style, drawn with Pillow), music sweep, neon border and zoom/flip."""
-import cv2
-import numpy as np
-from PIL import Image, ImageDraw
 
-
+# ======================================================================
+# overlay: subtitle (Pillow), music sweep, neon border, zoom/flip
+# ======================================================================
 SWEEP_TRAIL = np.array([255, 235, 60], np.float32)
 SWEEP_BAND = np.array([255, 255, 235], np.float32)
 
@@ -623,9 +633,7 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
 
     pad_x, pad_y = int(fs * 0.6), int(fs * 0.5)
     lh_box = int(fs * 1.4)
-    box_h = SUB_LINES * lh_box + 2 * pad_y
-    box_h = min(box_h, H)
-    # FIX: box_y was used before it was defined (UnboundLocalError -> empty preview)
+    box_h = min(SUB_LINES * lh_box + 2 * pad_y, H)
     max_y = max(0, H - box_h)
     box_y = max(0, min(int(pos_y / 100 * max_y), max_y))
 
@@ -644,8 +652,7 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     ink = (int(color[0]), int(color[1]), int(color[2]), 255)
     sw = max(1, round(cur_fs / 15))
     lh = int(cur_fs * 1.4)
-    block_h = len(lines) * lh
-    ty = box_y + (box_h - block_h) // 2
+    ty = box_y + (box_h - len(lines) * lh) // 2
     for ln in lines:
         lx = (W - font.getlength(ln)) / 2
         d.text((lx, ty), ln, font=font, fill=(0, 0, 0, 255),
@@ -736,26 +743,10 @@ def zoom_flip(fr, zoom, flip):
         return cv2.flip(fr, 1)
     return fr if zoomed else fr.copy()
 
+
 # ======================================================================
-# download
+# download: YouTube / TikTok (yt-dlp) · Rednote · local file
 # ======================================================================
-import glob
-import hashlib
-import os
-import re
-import shutil
-import tempfile
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-
-
-def _fix_dropbox(url):
-    u = urlparse(url)
-    q = parse_qs(u.query)
-    q["dl"] = ["1"]
-    return urlunparse(u._replace(query=urlencode(q, doseq=True)))
-
-
-# ---- Rednote / Xiaohongshu (page ထဲက video URL ကို တိုက်ရိုက်ထုတ်) -------------
 _RED_HOSTS = ("xhslink.com", "xiaohongshu.com", "rednote.com", "xhs.cn")
 _RED_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
            "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
@@ -792,7 +783,6 @@ def _walk(o, out):
 
 
 def _red_video_urls(html):
-    import json
     urls = []
     m = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*</script>", html, re.S)
     if m:
@@ -818,25 +808,6 @@ def _red_video_urls(html):
     return clean
 
 
-def _dl_rednote(url, out, progress=None):
-    import requests
-    hdr = {"User-Agent": _RED_UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-           "Referer": "https://www.xiaohongshu.com/"}
-    r = requests.get(url, headers=hdr, timeout=30, allow_redirects=True)
-    r.raise_for_status()
-    urls = _red_video_urls(r.text)
-    if not urls:
-        raise RuntimeError("Rednote page ထဲမှာ video URL မတွေ့ပါ (ပုံချည်းပါတဲ့ note ဖြစ်နိုင် / "
-                           "login လိုနေနိုင် / IP ပိတ်ခံရနိုင်)")
-    last = None
-    for u in urls[:6]:
-        try:
-            return _dl_direct(u, out, progress, headers=hdr)
-        except Exception as ex:
-            last = ex
-    raise RuntimeError(f"Rednote video ဖိုင် ဆွဲမရပါ: {str(last)[:200]}")
-
-
 def _dl_direct(url, out, progress=None, headers=None):
     import requests
     with requests.get(url, stream=True, timeout=30, allow_redirects=True,
@@ -857,12 +828,23 @@ def _dl_direct(url, out, progress=None, headers=None):
     return out
 
 
-def _dl_gdrive(url, out):
-    import gdown
-    gdown.download(url, out, quiet=True, fuzzy=True)
-    if not os.path.exists(out) or os.path.getsize(out) < 1024:
-        raise RuntimeError("Google Drive ဖိုင် မရပါ (Share ကို 'Anyone with the link' ထားပါ)")
-    return out
+def _dl_rednote(url, out, progress=None):
+    import requests
+    hdr = {"User-Agent": _RED_UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+           "Referer": "https://www.xiaohongshu.com/"}
+    r = requests.get(url, headers=hdr, timeout=30, allow_redirects=True)
+    r.raise_for_status()
+    urls = _red_video_urls(r.text)
+    if not urls:
+        raise RuntimeError("Rednote page ထဲမှာ video URL မတွေ့ပါ (ပုံချည်းပါတဲ့ note ဖြစ်နိုင် / "
+                           "login လိုနေနိုင် / IP ပိတ်ခံရနိုင်)")
+    last = None
+    for u in urls[:6]:
+        try:
+            return _dl_direct(u, out, progress, headers=hdr)
+        except Exception as ex:
+            last = ex
+    raise RuntimeError(f"Rednote video ဖိုင် ဆွဲမရပါ: {str(last)[:200]}")
 
 
 def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
@@ -922,7 +904,7 @@ def ensure_mp4(raw, final, height):
 def fetch_video(source, final, height=720, progress=None, cookies_file=None):
     source = extract_url(source)
 
-    if not re.match(r"^https?://", source, re.I):
+    if not re.match(r"^https?://", source, re.I):      # local file
         if not os.path.isfile(source):
             raise FileNotFoundError(f"ဖိုင် မတွေ့ပါ: {source}")
         ensure_mp4(source, final, height)
@@ -930,37 +912,23 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
 
     work = tempfile.mkdtemp(prefix="dl_")
     try:
-        u = urlparse(source)
-        host, path_l = u.netloc.lower(), u.path.lower()
+        host = urlparse(source).netloc.lower()
+        methods = ["rednote", "ytdlp"] if _is_rednote(host) else ["ytdlp"]
         raw, errs = None, []
-        if "drive.google.com" in host or "docs.google.com" in host:
-            raw = _dl_gdrive(source, os.path.join(work, "gd.bin"))
-        else:
-            url = source
-            if _is_rednote(host):
-                methods = ["rednote", "ytdlp"]
-            elif "dropbox.com" in host:
-                url = _fix_dropbox(url)
-                methods = ["direct", "ytdlp"]
-            elif path_l.endswith(VIDEO_EXT):
-                methods = ["direct", "ytdlp"]
-            else:
-                methods = ["ytdlp", "direct"]
-            for m in methods:
-                try:
-                    if m == "rednote":
-                        raw = _dl_rednote(url, os.path.join(work, "red.bin"), progress)
-                    elif m == "direct":
-                        raw = _dl_direct(url, os.path.join(work, "direct.bin"), progress)
-                    else:
-                        raw = _dl_ytdlp(url, os.path.join(work, "yt"), height, progress,
-                                        cookies_file)
-                    break
-                except Exception as ex:
-                    errs.append(f"{m}: {str(ex)[:300]}")
-                    raw = None
-            if not raw:
-                raise RuntimeError("Link ကနေ မဆွဲနိုင်ပါ\n" + "\n".join(errs))
+        for m in methods:
+            try:
+                if m == "rednote":
+                    raw = _dl_rednote(source, os.path.join(work, "red.bin"), progress)
+                else:
+                    raw = _dl_ytdlp(source, os.path.join(work, "yt"), height, progress,
+                                    cookies_file)
+                break
+            except Exception as ex:
+                errs.append(f"{m}: {str(ex)[:300]}")
+                raw = None
+        if not raw:
+            raise RuntimeError("Link ကနေ မဆွဲနိုင်ပါ (YouTube / TikTok / Rednote ပဲ ထောက်ပံ့တယ်)\n"
+                               + "\n".join(errs))
         if progress:
             progress(1.0)
         ensure_mp4(raw, final, height)
@@ -969,18 +937,9 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def source_key(source):
-    return hashlib.md5(source.encode()).hexdigest()[:8]
-
 # ======================================================================
-# transcribe
+# transcribe (faster-whisper)
 # ======================================================================
-import os
-import wave
-
-import numpy as np
-
-
 _MODELS = {}
 
 
@@ -1037,8 +996,6 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
 
     progress(0.0, "Audio ထုတ်နေတယ်")
     wav = os.path.join(workdir, "audio16k.wav")
-    # Error ဖြစ်နေတဲ့ အသံကို ဖျက်ပြီး (Discard) အသစ်ပြန် Encode လုပ်တဲ့ အတွက်
-    # -err_detect ignore_err နဲ့ -fflags +discardcorrupt ကို ထည့်ထားပါတယ်
     sh(["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
         "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
     with wave.open(wav) as wf:
@@ -1059,35 +1016,25 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
             f"အပိုင်း {len(units)} ခု")
     return ([{"start": u[0], "end": u[1], "src": u[2], "my": ""} for u in units], vdur, text)
 
+
 # ======================================================================
-# translate
+# translate (prompt building / parsing)
 # ======================================================================
-import re
-
-
-CHUNK = 50   # lines per Gemini prompt part
-
-
 def build_prompt(units, lang="my"):
     lines = "\n".join(f"[{i}] {u['src']}" for i, u in enumerate(units))
     return LANG_CONF[lang]["prompt"] + lines
 
 
 def build_prompt_chunks(units, lang="my", size=CHUNK):
-    head = LANG_CONF[lang]["prompt"]
+    conf = LANG_CONF[lang]
+    head = conf["prompt"]
     total = (len(units) + size - 1) // size
     out = []
     for k in range(total):
         lo, hi = k * size, min((k + 1) * size, len(units))
         lines = "\n".join(f"[{i}] {units[i]['src']}" for i in range(lo, hi))
         note = (f"(PART {k + 1} of {total} of the same episode. Only lines [{lo}] to [{hi - 1}]. "
-                f"Keep the SAME numbers. Keep character names and role words consistent "
-                f"with the other parts. Never use pronouns, always repeat the character name. "
-                f"For Burmese, when a name is unknown never write လူတစ်ယောက် — "
-                f"use a role word or leave the subject out. "
-                f"For Burmese, do not end every line with ပါတယ်; use it only when needed. "
-                f"For Burmese, vary the reporting verb — 'ပြောတယ်' at most once every four lines; "
-                f"prefer ဆိုတယ်, မေးတယ်, ဖြေတယ်, ရှင်းပြတယ်, ပြန်ပြောတယ်, အော်တယ် and rotate.)\n\n")
+                f"Keep the SAME numbers. {conf['chunk_note']})\n\n")
         out.append({"lo": lo, "hi": hi, "text": head + note + lines})
     return out
 
@@ -1111,14 +1058,10 @@ def check_part(text, lo, hi):
     missing = [i for i in range(lo, hi) if i not in got]
     return got, missing
 
-# ======================================================================
-# tts
-# ======================================================================
-import asyncio
-import shutil
-import threading
 
-
+# ======================================================================
+# tts (Edge only)
+# ======================================================================
 def tts_edge(text, voice, rate, mp3, proxy=None):
     import edge_tts
 
@@ -1129,87 +1072,9 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
     asyncio.run(run())
 
 
-def _gclient(space, token):
-    from gradio_client import Client
-    if token:
-        try:
-            return Client(space, token=token)
-        except TypeError:
-            return Client(space, hf_token=token)
-    return Client(space)
-
-
-class VoxEngine:
-    def __init__(self, ref_path=None, token=None):
-        self.ref = ref_path or None
-        self.token = token
-        self.clients = {}
-        self.fails = {i: 0 for i in range(len(VOX_SPACES))}
-        self.dead = set()
-        self.active = None
-        self.last_err = ""
-        self.lock = threading.Lock()
-
-    def reset(self):
-        with self.lock:
-            self.dead.clear()
-            self.fails = {i: 0 for i in range(len(VOX_SPACES))}
-            self.clients = {}
-
-    def synth(self, text, out_wav):
-        from gradio_client import handle_file
-        order = [i for i in range(len(VOX_SPACES)) if i not in self.dead]
-        if self.active in order:
-            order.remove(self.active)
-            order.insert(0, self.active)
-        for i in order:
-            sp = VOX_SPACES[i]
-            if sp["type"] == "burmese" and not self.ref:
-                self.dead.add(i)
-                self.last_err = f"{sp['space']}: reference audio လိုအပ်တယ် (--vox-ref)"
-                continue
-            try:
-                cl = self.clients.get(i)
-                if cl is None:
-                    cl = _gclient(sp["space"], self.token)
-                    self.clients[i] = cl
-                rf = handle_file(self.ref) if self.ref else None
-                if sp["type"] == "demo":
-                    res = cl.predict(
-                        text_input=text,
-                        control_instruction="A warm young woman, calm and expressive",
-                        reference_wav_path_input=rf,
-                        use_prompt_text=False, prompt_text_input="",
-                        cfg_value_input=2.0, do_normalize=True, denoise=False,
-                        api_name="/generate")
-                else:
-                    res = cl.predict(
-                        target_text=text, ref_audio=rf,
-                        ref_text="မြန်မာ အသံနမူနာ", cfg_value=2.0,
-                        inference_timesteps=10, api_name="/tts")
-                p = res[0] if isinstance(res, (tuple, list)) else res
-                shutil.copy(p, out_wav)
-                self.active = i
-                return sp["space"]
-            except Exception as ex:
-                self.last_err = f"{sp['space']}: {str(ex)[:120]}"
-                self.fails[i] += 1
-                if self.fails[i] >= 2:
-                    self.dead.add(i)
-        return None
-
 # ======================================================================
 # render
 # ======================================================================
-import os
-import queue
-import re
-import subprocess
-import threading
-
-import cv2
-
-
 def detect_crop(src):
     r = subprocess.run(
         ["ffmpeg", "-ss", "1", "-i", src, "-t", "8", "-vf", "cropdetect=24:2:0",
@@ -1227,7 +1092,6 @@ def prepare_video(src, dst, target_h, crop=True):
         c = detect_crop(src)
         cap = cv2.VideoCapture(src)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         cap.release()
         if c and c[1] < h * 0.95 and c[0] > 0 and c[1] > 0:
             vf = f"crop={c[0]}:{c[1]}:{c[2]}:{c[3]},scale=-2:{target_h}"
@@ -1377,16 +1241,11 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     return out
 
 
-# ---- video splitter (download အတွက် အပိုင်းခွဲ) ----------------------------
+# ---- video splitter
 def split_plan(total, seg_secs):
-    """Return [(start, duration), ...].
-
-    Every part is seg_secs long, and whatever is left over at the end is merged
-    into the LAST part (6:20 @ 2min -> 2:00, 2:00, 2:20 ; never a tiny 0:20 clip).
-    seg_secs <= 0 or a video not longer than one segment -> a single part.
-    """
-    total = float(total)
-    seg = float(seg_secs)
+    """[(start, duration), ...] — leftover seconds are merged into the LAST part
+    (6:20 @ 2min -> 2:00, 2:00, 2:20 ; never a tiny 0:20 clip)."""
+    total, seg = float(total), float(seg_secs)
     if seg <= 0 or total <= seg:
         return [(0.0, total)]
     n = max(1, int(total // seg))
@@ -1399,18 +1258,12 @@ def split_plan(total, seg_secs):
 
 
 def split_video(src, out_prefix, seg_min=2.0, progress=None):
-    """Cut `src` into parts of `seg_min` minutes (leftover merged into the last part).
-
-    Files are named <out_prefix>_part01.mp4, _part02.mp4 ...
-    Returns the list of part paths (or [src] when no split is needed).
-    Re-encodes (ultrafast) so cuts are frame-accurate and every part starts cleanly.
-    """
+    """Cut `src` into <out_prefix>_part01.mp4 ... Returns part paths (or [src] if no split)."""
     total = probe_duration(src)
     plan = split_plan(total, float(seg_min) * 60.0)
     if len(plan) <= 1:
         return [src]
-    outs = []
-    n = len(plan)
+    outs, n = [], len(plan)
     for k, (st, dur) in enumerate(plan):
         out = f"{out_prefix}_part{k + 1:02d}.mp4"
         sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-i", src, "-t", f"{dur:.3f}",
@@ -1422,7 +1275,7 @@ def split_video(src, out_prefix, seg_min=2.0, progress=None):
     return outs
 
 
-# ---- preview (5-second scrubbable clip) ----------------------------------
+# ---- preview (5-second scrubbable clip)
 _NEON_CACHE = {}
 
 
@@ -1436,7 +1289,6 @@ def _neon_for(W, H, th, speed):
 
 
 def _preview_clip(src, clip_path, height, crop):
-    """Cut a short (~5.5s) prepared (cropped+scaled) clip once and cache it on disk."""
     if os.path.exists(clip_path) and os.path.getsize(clip_path) > 1000:
         return clip_path
     raw = clip_path + "_raw.mp4"
@@ -1473,7 +1325,6 @@ def _preview_frame_at(src, cache_dir, height, crop, t):
     cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
     ok, fr = cap.read()
     if not ok:
-        # fallback: sequential read up to idx (or last readable frame)
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         fr = None
         for _ in range(idx + 1):
@@ -1503,13 +1354,10 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     cv2.imwrite(out_png, fr)
     return out_png
 
+
 # ======================================================================
 # project
 # ======================================================================
-import json
-import os
-
-
 class Project:
     FILE = "project.json"
 
@@ -1517,7 +1365,6 @@ class Project:
         self.path = os.path.abspath(path)
         self.data = {"source": "", "vdur": 0.0, "units": [], "timings": {}, "settings": {}}
 
-    # -- paths --
     @property
     def video(self):
         return os.path.join(self.path, "src.mp4")
@@ -1542,7 +1389,6 @@ class Project:
     def settings(self):
         return Settings.from_dict(self.data.get("settings"))
 
-    # -- io --
     @classmethod
     def create(cls, path):
         os.makedirs(os.path.abspath(path), exist_ok=True)
@@ -1571,15 +1417,10 @@ class Project:
     def update_settings(self, s):
         self.data["settings"] = s.to_dict()
 
+
 # ======================================================================
 # pipeline
 # ======================================================================
-import hashlib
-import os
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-
 def init_project(path, source, height=720, cookies_file=None, progress=None):
     proj = Project.create(path)
     if os.path.exists(proj.video) and proj.data.get("source") == source:
@@ -1627,16 +1468,11 @@ def apply_translation(proj, text, lang):
     return len(got), missing
 
 
-def _synthesize(proj, my_list, s, progress, proxy, hf_token):
+def _synthesize(proj, my_list, s, progress, proxy):
     wd = proj.path
     n = len(my_list)
-    is_vox = s.engine == "vox"
-    vox = VoxEngine(s.vox_ref or None, hf_token) if is_vox else None
-    ref_sig = "noref"
-    if is_vox and s.vox_ref and os.path.exists(s.vox_ref):
-        ref_sig = f"{os.path.basename(s.vox_ref)}-{os.path.getsize(s.vox_ref)}"
     voice = s.resolved_voice()
-    sig_base = f"{s.engine}|{voice}|{s.rate_str()}|{ref_sig}"
+    sig_base = f"edge|{voice}|{s.rate_str()}|noref"
 
     def do_line(i):
         wav = os.path.join(wd, f"a{i:04d}.wav")
@@ -1649,38 +1485,24 @@ def _synthesize(proj, my_list, s, progress, proxy, hf_token):
                         return i, wav_dur(wav)
             except Exception:
                 pass
-        if vox is not None:
-            raw_audio = os.path.join(wd, f"a{i:04d}_raw.wav")
-            used = None
-            for _ in range(s.vox_retry):
-                used = vox.synth(my_list[i], raw_audio)
-                if used:
-                    break
-                vox.reset()
-                time.sleep(3)
-            if not used:
-                raise RuntimeError(f"VoxCPM မအောင်မြင်ပါ (စာကြောင်း #{i}): {vox.last_err}\n"
-                                   "Edge TTS မသုံးထားပါ။ ခဏနေပြီး ပြန်စမ်းပါ။")
-        else:
-            raw_audio = os.path.join(wd, f"a{i:04d}_raw.mp3")
-            for attempt in range(4):
-                try:
-                    tts_edge(my_list[i], voice, s.rate_str(), raw_audio, proxy)
-                    break
-                except Exception as ex:
-                    if attempt == 3:
-                        raise RuntimeError(f"Edge TTS မအောင်မြင်ပါ (စာကြောင်း #{i}): {ex}\n{my_list[i]}")
-                    time.sleep(1.5)
+        raw_audio = os.path.join(wd, f"a{i:04d}_raw.mp3")
+        for attempt in range(4):
+            try:
+                tts_edge(my_list[i], voice, s.rate_str(), raw_audio, proxy)
+                break
+            except Exception as ex:
+                if attempt == 3:
+                    raise RuntimeError(f"Edge TTS မအောင်မြင်ပါ (စာကြောင်း #{i}): {ex}\n{my_list[i]}")
+                time.sleep(1.5)
         sh(["ffmpeg", "-y", "-i", raw_audio, "-af", TRIM, "-ar", "44100", "-ac", "1", wav])
         with open(keyf, "w") as kf:
             kf.write(key)
         return i, wav_dur(wav)
 
     durs = [0.0] * n
-    workers = 1 if is_vox else max(1, s.tts_workers)
     done = 0
     progress(0.0, f"အသံ ထုတ်နေတယ် 0/{n}")
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, s.tts_workers)) as pool:
         futs = [pool.submit(do_line, i) for i in range(n)]
         try:
             for fu in as_completed(futs):
@@ -1734,7 +1556,7 @@ def _build_subs(my_list, durs, lang):
     return subs
 
 
-def run_render(proj, s, proxy=None, hf_token=None, progress=None):
+def run_render(proj, s, proxy=None, progress=None):
     progress = progress or Progress()
     lang = s.lang
     conf = LANG_CONF[lang]
@@ -1746,8 +1568,6 @@ def run_render(proj, s, proxy=None, hf_token=None, progress=None):
     if empty:
         raise RuntimeError(f"စာသား မဖြည့်ရသေးတဲ့ စာကြောင်း: {empty[:20]}"
                            " — recap apply နဲ့ translated.txt ကို အရင်ဖြည့်ပါ")
-    if s.engine == "vox" and lang != "my":
-        log("⚠️ VoxCPM က မြန်မာအတွက်သာ သင့်တယ်။ ဂျာမနီ/ဂျပန်အတွက် --engine edge သုံးပါ။")
 
     font = ""
     if s.sub:
@@ -1761,7 +1581,7 @@ def run_render(proj, s, proxy=None, hf_token=None, progress=None):
     t_all = time.time()
 
     t_a = time.time()
-    durs = _synthesize(proj, my_list, s, progress.sub(0.0, 0.3), proxy, hf_token)
+    durs = _synthesize(proj, my_list, s, progress.sub(0.0, 0.3), proxy)
     T["TTS"] = time.time() - t_a
 
     t_a = time.time()
@@ -1783,27 +1603,20 @@ def run_render(proj, s, proxy=None, hf_token=None, progress=None):
     proj.save()
     return {"final": proj.final, "new_dur": total, "old_dur": vdur, "timings": T}
 
+
 # ======================================================================
 # cli
 # ======================================================================
-import argparse
-import os
-import shutil
-import sys
-
-
 SUP = argparse.SUPPRESS
 
 
 def add_style_args(p):
     g = p.add_argument_group("voice / language")
-    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | ja")
-    g.add_argument("--engine", choices=["edge", "vox"], default=SUP)
+    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de")
     g.add_argument("--voice", default=SUP, help="Edge voice name (e.g. my-MM-NilarNeural)")
-    g.add_argument("--rate", type=int, default=SUP, help="Edge speed %% (-50..100)")
+    g.add_argument("--rate", type=int, default=SUP,
+                   help="Edge speed %% (-50..100) · default: my 45 / de 10")
     g.add_argument("--workers", dest="tts_workers", type=int, default=SUP, help="parallel TTS jobs")
-    g.add_argument("--vox-retry", type=int, default=SUP)
-    g.add_argument("--vox-ref", default=SUP, help="reference audio for VoxCPM")
     g = p.add_argument_group("video")
     g.add_argument("--height", type=int, choices=[360, 480, 720, 1080], default=SUP)
     g.add_argument("--fps", type=int, choices=[20, 24, 25, 30], default=SUP)
@@ -1815,7 +1628,9 @@ def add_style_args(p):
     g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP,
                    help="mirror မလုပ်ဘူး")
     g.add_argument("--split", dest="split_min", type=float, default=SUP,
-                   help="video ကို မိနစ်အလိုက် အပိုင်းခွဲ (default 2 · 0 = မခွဲဘူး)")
+                   help="video ကို မိနစ်အလိုက် အပိုင်းခွဲ (default 2)")
+    g.add_argument("--no-split", dest="split", action="store_false", default=SUP,
+                   help="အပိုင်းခွဲတာ OFF (video တစ်ခုတည်း ထုတ်မယ်)")
     g = p.add_argument_group("subtitles / neon")
     g.add_argument("--no-sub", dest="sub", action="store_false", default=SUP)
     g.add_argument("--no-sweep", dest="sub_sweep", action="store_false", default=SUP,
@@ -1843,13 +1658,14 @@ def settings_for(proj, args):
     for k, v in vars(args).items():
         if hasattr(s, k):
             setattr(s, k, v)
-    s.rate = max(-50, min(100, s.rate))
+    if s.rate is not None:
+        s.rate = max(-50, min(100, int(s.rate)))
     s.max_speed = max(1.0, min(2.0, s.max_speed))
     s.zoom = max(1.0, min(1.25, s.zoom))
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.split_min = max(0.0, float(s.split_min))
-    if s.voice and s.engine == "edge":
+    if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
             log(f"⚠️ voice '{s.voice}' က {s.lang} စာရင်းထဲမှာ မပါဘူး — default သုံးမယ်။ ရနိုင်တာ: {', '.join(valid)}")
@@ -1878,7 +1694,7 @@ def cmd_transcribe(args, proj=None):
     prog.done()
     nparts = len(build_prompt_chunks(proj.units, lang))
     print(f"✅ {info}\n   Prompt: {proj.prompt_file}  (+ prompt_part01..{nparts:02d}.txt · {CHUNK} ကြောင်းစီ)")
-    print("   → prompt_partNN.txt ကို တစ်ခုချင်း Gemini ထဲ paste၊ ရလဒ်အကုန်ကို translated.txt ထဲ အစဉ်လိုက်ထည့်ပြီး `recap apply` လုပ်ပါ")
+    print("   → prompt_partNN.txt ကို တစ်ခုချင်း Gemini ထဲ paste၊ ရလဒ်အကုန်ကို translated.txt ထဲ အစဉ်လိုက်ထည့်ပြီး `apply` လုပ်ပါ")
     return proj
 
 
@@ -1917,8 +1733,7 @@ def cmd_render(args, proj=None):
     proj = proj or Project.load(args.dir)
     s = settings_for(proj, args)
     prog = Progress()
-    res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None,
-                     os.environ.get("HF_TOKEN") or None, prog)
+    res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None, prog)
     prog.done()
     out = args.output
     if out:
@@ -1929,9 +1744,8 @@ def cmd_render(args, proj=None):
     print(f"\n✅ ပြီးပြီ: {out}  ({mb:.1f} MB)")
     print(f"   {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s)")
 
-    # ---- split into parts (leftover merged into the last part) ----
-    if s.split_min and s.split_min > 0:
-        prefix = os.path.splitext(out)[0]
+    prefix = os.path.splitext(out)[0]
+    if s.split and s.split_min and s.split_min > 0:
         for old in glob.glob(prefix + "_part*.mp4"):
             try:
                 os.remove(old)
@@ -1946,6 +1760,8 @@ def cmd_render(args, proj=None):
                 print(f"   {p_}  ({fmt_t(probe_duration(p_))}, {os.path.getsize(p_) / 1e6:.1f} MB)")
         else:
             print(f"✂️ video က {s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ")
+    else:
+        print("✂️ အပိုင်းခွဲတာ OFF — video တစ်ခုတည်း")
 
     t = {**{"transcribe": proj.data["timings"].get("transcribe", 0)}, **res["timings"]}
     print("⏱️\n" + timing_table({k: v for k, v in t.items() if v}))
@@ -1962,8 +1778,7 @@ def cmd_preview(args):
 
 
 def cmd_run(args):
-    key_dir = args.dir or os.path.join("work", "recap")
-    args.dir = key_dir
+    args.dir = args.dir or os.path.join("work", "recap")
     proj = cmd_init(args)
     s = settings_for(proj, args)
     proj.update_settings(s)
@@ -1980,24 +1795,27 @@ def cmd_run(args):
         print(f"\n📋 Prompt: {proj.prompt_file}  (အပိုင်းခွဲ: prompt_partNN.txt)")
         print(f"   ① prompt_partNN.txt ကို Gemini မှာ တစ်ခုချင်း paste  ② ရလဒ်အကုန်ကို {src} မှာ အစဉ်လိုက် သိမ်း")
         if not sys.stdin.isatty():
-            sys.exit(f"\n⏸️ translated ဖိုင်မရှိလို့ ရပ်လိုက်တယ်။ ဖြည့်ပြီးရင် `recap run ... --translated {src}` "
-                     "(သို့) `recap apply` + `recap render` လုပ်ပါ")
+            sys.exit(f"\n⏸️ translated ဖိုင်မရှိလို့ ရပ်လိုက်တယ်။ ဖြည့်ပြီးရင် `run ... --translated {src}` "
+                     "(သို့) `apply` + `render` လုပ်ပါ")
         input("   ③ ပြီးရင် Enter နှိပ်ပါ ▶ ")
     if not cmd_apply(args, proj, src):
         sys.exit("❌ စာကြောင်း မပြည့်သေးပါ — translated ဖိုင်ကို စစ်ပြီး ပြန် run ပါ (cache ရှိလို့ မြန်မယ်)")
     cmd_render(args, proj)
 
 
-# -------------------------------------------------------------- parser
+def cmd_ui(args):
+    launch_ui()
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="recap.py",
-        description="Recap video dubber: Whisper -> Gemini (manual) -> TTS -> smart-sync render -> split")
+        description="Recap video dubber: Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render -> split")
     p.add_argument("--version", action="version", version=f"recap-cli {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("init", help="video link/ဖိုင်ကို project ထဲ ထည့်")
-    a.add_argument("source", help="URL (mp4/GDrive/Dropbox/YouTube/FB/TikTok...) or local file")
+    a.add_argument("source", help="YouTube / TikTok / Rednote URL or local file")
     a.add_argument("-d", "--dir", required=True, help="project folder")
     a.add_argument("--height", type=int, default=720)
     a.add_argument("--cookies", help="yt-dlp cookies.txt (သို့) env YT_COOKIES")
@@ -2005,7 +1823,7 @@ def build_parser():
 
     a = sub.add_parser("transcribe", help="Whisper စာသားထုတ် + prompt.txt")
     a.add_argument("dir")
-    a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de | ja")
+    a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de")
     add_whisper_args(a)
     a.set_defaults(fn=cmd_transcribe)
 
@@ -2043,7 +1861,422 @@ def build_parser():
     add_whisper_args(a)
     add_style_args(a)
     a.set_defaults(fn=cmd_run)
+
+    a = sub.add_parser("ui", help="Gradio web UI (dark mode)")
+    a.set_defaults(fn=cmd_ui)
     return p
+
+
+# ======================================================================
+# Web UI (Gradio) — DARK MODE ONLY   (loaded lazily so the CLI works without gradio)
+# ======================================================================
+def launch_ui():
+    import gradio as gr
+
+    BASE = os.path.join(os.getcwd(), "work_ui")
+    os.makedirs(BASE, exist_ok=True)
+    PORT = int(os.environ.get("PORT", "7860"))
+    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de"}
+
+    def voices_for(code):
+        return [v for v, _ in LANG_CONF[code]["edge_voices"]]
+
+    def _path(f):
+        if not f:
+            return ""
+        return f if isinstance(f, str) else getattr(f, "name", "")
+
+    def _cb(progress):
+        return lambda frac, label=None: progress(frac, desc=label or "")
+
+    def _source(url, upload):
+        return _path(upload) or extract_url(url or "")
+
+    def _pbar(frac, width=20):
+        frac = max(0.0, min(float(frac), 1.0))
+        fill = int(width * frac)
+        return "█" * fill + "░" * (width - fill)
+
+    def _ensure_video(url, upload, height, cb):
+        source = _source(url, upload)
+        if not source:
+            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+        key = source
+        if os.path.isfile(source):
+            key += f"|{os.path.getsize(source)}"
+        pdir = os.path.join(BASE, hashlib.md5(key.encode()).hexdigest()[:10])
+        dl_prog = Progress(0.0, 1.0, parent=lambda f, l=None: cb(f, "Video ယူနေတယ်..."))
+        proj = init_project(pdir, source, int(height), os.environ.get("YT_COOKIES"), dl_prog)
+        return pdir, proj
+
+    # ---------------- dark-only theme
+    dark_head = """
+<script>
+(function () {
+  function forceDark() {
+    var r = document.documentElement;
+    if (!r.classList.contains('dark')) r.classList.add('dark');
+    if (document.body && !document.body.classList.contains('dark')) document.body.classList.add('dark');
+  }
+  forceDark();
+  new MutationObserver(forceDark).observe(document.documentElement, {attributes: true, attributeFilter: ['class']});
+  document.addEventListener('DOMContentLoaded', function () {
+    forceDark();
+    new MutationObserver(forceDark).observe(document.body, {attributes: true, attributeFilter: ['class']});
+  });
+})();
+</script>
+"""
+    ui_kw = {
+        "title": "Recap → Burmese / German",
+        "theme": gr.themes.Base(primary_hue="indigo", secondary_hue="purple", neutral_hue="slate"),
+        "css": ":root, html, body, gradio-app { color-scheme: dark; }"
+               " body, gradio-app, .gradio-container { background: #0b0f19 !important; }",
+        "js": "() => { document.documentElement.classList.add('dark'); document.body.classList.add('dark'); }",
+        "head": dark_head,
+    }
+    try:
+        bp = set(inspect.signature(gr.Blocks.__init__).parameters)
+    except Exception:
+        bp = set(ui_kw)
+    blocks_kw = {k: v for k, v in ui_kw.items() if k in bp}
+    launch_kw = {k: v for k, v in ui_kw.items() if k not in bp}
+
+    # ---------------- fetch + preview
+    FETCH = {}
+
+    def start_fetch(url, upload, height):
+        if not _source(url, upload):
+            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+        jid = uuid.uuid4().hex[:8]
+        st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None,
+              "done": False, "t0": time.time()}
+        FETCH[jid] = st
+
+        def cb(f, label=None):
+            st["f"] = max(0.0, min(float(f), 1.0))
+            if label:
+                st["label"] = label
+
+        def work():
+            try:
+                st["res"] = _ensure_video(url, upload, height, cb)
+            except BaseException as ex:
+                st["err"] = ex
+            finally:
+                st["done"] = True
+
+        threading.Thread(target=work, daemon=True).start()
+        return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
+
+    def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
+                 pv_t, strict):
+        if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
+            if strict:
+                raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
+            return gr.skip()
+        code = LANGS[lang_name]
+        try:
+            proj = Project.load(pdir)
+            s = proj.settings
+            s.lang, s.height, s.zoom = code, int(height), float(zoom)
+            s.crop, s.flip, s.sub, s.neon = bool(crop), bool(flip), bool(sub), bool(neon)
+            s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
+            s.neon_speed = Settings().neon_speed
+            font = find_font(code, s.font) if s.sub else None
+            for old in glob.glob(os.path.join(pdir, "preview_*.png")):
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+            out = os.path.join(pdir, f"preview_{int(time.time() * 1000)}.png")
+            make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
+                               LANG_CONF[code]["is_mm"], float(pv_t or 0.0))
+            return out
+        except Exception as ex:
+            log(f"preview error: {ex}")
+            if strict:
+                raise gr.Error(str(ex)[:400])
+            return gr.skip()
+
+    def preview_auto(*a):
+        return _preview(*a, False)
+
+    def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
+                   pv_t):
+        st = FETCH.get(jid) if jid else None
+        if st is None:
+            return gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
+        elapsed = time.time() - st["t0"]
+        if not st["done"]:
+            if st["f"] >= 1.0:
+                msg = "🔄 MP4 ပြင်ဆင်နေတယ် (ဖိုင်ကြီးရင် ခဏကြာမယ်)"
+            else:
+                msg = f"⬇️ {st['label']} {int(st['f'] * 100)}%"
+            return gr.skip(), f"{msg} · {elapsed:.0f}s", gr.skip(), gr.skip()
+        FETCH.pop(jid, None)
+        if st["err"] is not None:
+            return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.Timer(active=False)
+        pdir, proj = st["res"]
+        mb = os.path.getsize(proj.video) / 1e6
+        img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
+                       sweep, pv_t, False)
+        return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ",
+                img, gr.Timer(active=False))
+
+    # ---------------- step 1 (whisper)
+    TRANS = {}
+
+    def start_step1(url, upload, lang_name, model, src_lang, max_min, height):
+        if not _source(url, upload):
+            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+        code = LANGS[lang_name]
+        jid = uuid.uuid4().hex[:8]
+        st = {"f": 0.0, "label": "စတင်နေတယ်...", "res": None, "err": None,
+              "done": False, "t0": time.time()}
+        TRANS[jid] = st
+
+        def cb(f, label=None):
+            st["f"] = max(0.0, min(float(f), 1.0))
+            if label:
+                st["label"] = label
+
+        def work():
+            try:
+                cb(0.0, "Video ယူနေတယ်...")
+                pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
+                tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
+                info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
+                st["res"] = (pdir, info, build_prompt_chunks(proj.units, code))
+            except BaseException as ex:
+                st["err"] = ex
+            finally:
+                st["done"] = True
+
+        threading.Thread(target=work, daemon=True).start()
+        return jid, "⏳ စတင်နေတယ်... 0%", gr.Timer(active=True), gr.update(interactive=False)
+
+    def poll_step1(jid):
+        st = TRANS.get(jid) if jid else None
+        if st is None:
+            return (gr.skip(), gr.skip(), gr.skip(), gr.skip(),
+                    gr.Timer(active=False), gr.update(interactive=True))
+        elapsed = time.time() - st["t0"]
+        if not st["done"]:
+            pct = int(st["f"] * 100)
+            msg = f"⏳ {st['label']}\n\n`[{_pbar(st['f'])}] {pct}%` · {elapsed:.0f}s"
+            return gr.skip(), msg, gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        TRANS.pop(jid, None)
+        if st["err"] is not None:
+            return (gr.skip(), f"❌ {str(st['err'])[:500]}", gr.skip(), gr.skip(),
+                    gr.Timer(active=False), gr.update(interactive=True))
+        pdir, info, chunks = st["res"]
+        return (pdir, f"✅ 100% · {info} · Prompt {len(chunks)} ပိုင်း · {elapsed:.0f}s",
+                chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
+
+    # ---------------- step 2 (tts + render + split)
+    def step2(pdir, translated, parts, lang_name, voice, rate, workers,
+              height, fps, preset, max_speed, crop, flip, zoom,
+              sub, sub_size, sub_pos, neon, sweep, split_on, split_min,
+              progress=gr.Progress()):
+        if not pdir or not os.path.isdir(pdir):
+            raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
+        code = LANGS[lang_name]
+        try:
+            proj = Project.load(pdir)
+            if not proj.units:
+                raise RuntimeError("1️⃣ စာသားထုတ် ကို အရင်လုပ်ပါ")
+            text = "\n".join((parts or {})[k] for k in sorted(parts or {})) + "\n" + (translated or "")
+            got, missing = apply_translation(proj, text, code)
+            if missing:
+                raise RuntimeError(f"ဘာသာပြန် မပြည့်သေးဘူး ({got}/{len(proj.units)}) · မပါတာ: {missing[:15]}")
+            s = proj.settings
+            s.lang = code
+            s.voice = voice if voice in voices_for(code) else ""
+            s.rate, s.tts_workers = int(rate), int(workers)
+            s.height, s.fps, s.preset = int(height), int(fps), preset
+            s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
+            s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
+            s.sub_sweep = bool(sweep)
+            s.split = bool(split_on)
+            s.split_min = max(0.0, float(split_min or 0))
+            s.neon_speed = Settings().neon_speed
+            prog = Progress(0.0, 1.0, parent=_cb(progress))
+            res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None, prog.sub(0.0, 0.9))
+        except gr.Error:
+            raise
+        except Exception as ex:
+            raise gr.Error(str(ex)[:600])
+
+        for old in glob.glob(os.path.join(pdir, "final_*.mp4")):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        out = os.path.join(pdir, f"final_{code}_{int(time.time())}.mp4")
+        shutil.copy(res["final"], out)
+        mb = os.path.getsize(out) / 1e6
+
+        files, split_note = [out], ""
+        if s.split and s.split_min > 0:
+            try:
+                parts_out = split_video(out, os.path.splitext(out)[0], s.split_min,
+                                        prog.sub(0.9, 1.0))
+            except Exception as ex:
+                raise gr.Error(f"အပိုင်းခွဲလို့ မရပါ: {str(ex)[:400]}")
+            if len(parts_out) > 1:
+                files = parts_out
+                durs = [probe_duration(p) for p in parts_out]
+                split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း ခွဲပြီး · "
+                              + " · ".join(f"P{k + 1} {fmt_t(d)}" for k, d in enumerate(durs)))
+            else:
+                split_note = f"\n\n✂️ video က {s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ"
+        else:
+            split_note = "\n\n✂️ အပိုင်းခွဲတာ OFF — video တစ်ခုတည်း"
+
+        return (out, files,
+                f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
+                + split_note)
+
+    def reset_all(pdir):
+        if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
+            shutil.rmtree(pdir, ignore_errors=True)
+        return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
+
+    def make_setter(lo, hi):
+        def f(text, parts):
+            parts = dict(parts or {})
+            text = text or ""
+            parts[lo] = text
+            if not text.strip():
+                return parts, "⏳ မဖြည့်သေး"
+            got, missing = check_part(text, lo, hi)
+            if missing:
+                return parts, f"⚠️ {len(got)}/{hi - lo} · မပါတာ: {missing[:10]}"
+            return parts, f"✅ {hi - lo}/{hi - lo}"
+        return f
+
+    def on_lang_change(l):
+        code = LANGS[l]
+        v = voices_for(code)
+        return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
+
+    # ---------------- layout
+    with gr.Blocks(**blocks_kw) as demo:
+        gr.Markdown("# 🎙️ Recap → Burmese / German  `build 18`\n"
+                    "Whisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS → Smart Sync → စာတန်း + Neon → ✂️ အပိုင်းခွဲ (ON/OFF)")
+        pdir_state = gr.State("")
+
+        height = gr.State(720)
+        fps = gr.State(24)
+        preset = gr.State("ultrafast")
+        max_speed = gr.State(1.25)
+        crop = gr.State(True)
+        model = gr.State("base")
+        src_lang = gr.State("auto")
+        max_min = gr.State(0)
+        translated = gr.State("")
+
+        with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
+            lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
+            voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="Edge voice")
+            with gr.Row():
+                rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
+                                 label="Edge speed % (ဘာသာစကားပြောင်းရင် အလိုအလျောက် ချိန်မယ်)")
+                workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
+            lang.change(on_lang_change, lang, [voice, rate])
+
+        gr.Markdown("### 📥 Video")
+        url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
+                         placeholder="https://...")
+        upload = gr.File(label="(သို့) Video ဖိုင်တင်", type="filepath",
+                         file_types=[".mp4", ".mov", ".mkv", ".webm", ".m4v"])
+        b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
+        status_fetch = gr.Markdown()
+
+        gr.Markdown("### 🎨 စာတန်း / Neon (Preview ကြည့်ပြီး ချိန်ပါ)")
+        pv_img = gr.Image(label="Preview", type="filepath", interactive=False)
+        pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
+                         label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့်)")
+        with gr.Accordion("🎛️ စာတန်း / Neon / Mirror", open=False):
+            with gr.Row():
+                sub = gr.Checkbox(True, label="စာတန်း")
+                sweep = gr.Checkbox(True, label="🎵 Music sweep")
+                neon = gr.Checkbox(True, label="Neon")
+                flip = gr.Checkbox(True, label="Mirror")
+            sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
+            sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
+            zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
+
+        pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep, pv_t]
+        fetch_job = gr.State("")
+        fetch_timer = gr.Timer(1.0, active=False)
+        for trig in (url.submit, b_fetch.click, upload.upload):
+            trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
+        fetch_timer.tick(poll_fetch,
+                         [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
+                          sweep, pv_t],
+                         [pdir_state, status_fetch, pv_img, fetch_timer],
+                         show_progress="hidden")
+        for c in (sub_size, sub_pos, zoom, sub, sweep, neon, flip, lang, pv_t):
+            c.change(preview_auto, pv_in, pv_img,
+                     trigger_mode="always_last", show_progress="hidden", queue=True)
+
+        gr.Markdown("### 1️⃣ စာသားထုတ်")
+        b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
+        status1 = gr.Markdown()
+        trans_job = gr.State("")
+        trans_timer = gr.Timer(1.0, active=False)
+        chunks_state = gr.State([])
+        parts_state = gr.State({})
+
+        with gr.Accordion("📋 Prompt အပိုင်းများ (၅၀ ကြောင်းစီ) — Copy → Gemini → ရလဒ်ကို အောက်က box မှာ paste",
+                          open=False):
+
+            @gr.render(inputs=chunks_state)
+            def show_chunks(chunks):
+                if not chunks:
+                    gr.Markdown("_1️⃣ နှိပ်ပြီးရင် Prompt အပိုင်းတွေ ဒီမှာ ပေါ်မယ်_")
+                    return
+                for k, c in enumerate(chunks):
+                    with gr.Accordion(f"Part {k + 1}/{len(chunks)} · [{c['lo']} – {c['hi'] - 1}]",
+                                      open=False):
+                        gr.Textbox(value=c["text"], lines=3, max_lines=5, interactive=False,
+                                   show_copy_button=True, label="① Prompt (Copy ခလုတ်နှိပ်)")
+                        box = gr.Textbox(label=f"② Gemini ရလဒ် Part {k + 1} ကို ဒီမှာ paste",
+                                         lines=3, max_lines=5)
+                        st = gr.Markdown("⏳ မဖြည့်သေး")
+                        box.change(make_setter(c["lo"], c["hi"]), [box, parts_state], [parts_state, st])
+
+        gr.Markdown("### 2️⃣ အသံထုတ် + Video")
+        with gr.Row():
+            split_on = gr.Checkbox(True, label="✂️ အပိုင်းခွဲမယ် (ON / OFF)", scale=1)
+            split_min = gr.Slider(0.5, 10, value=2, step=0.5, scale=3,
+                                  label="အပိုင်းတစ်ခု မိနစ် · ကျန်တဲ့ စက္ကန့်တွေကို နောက်ဆုံးအပိုင်းမှာ ပေါင်းထည့်မယ်")
+        split_on.change(lambda on: gr.update(interactive=bool(on)), split_on, split_min)
+        b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
+        status2 = gr.Markdown()
+        video = gr.Video(label="ရလဒ်", autoplay=True)
+        dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲထားရင် ဖိုင်တစ်ခုချင်း နှိပ်ဒေါင်း)",
+                     file_count="multiple")
+        b3 = gr.Button("🗑️ အသစ်ပြန်စ")
+
+        b1.click(start_step1, [url, upload, lang, model, src_lang, max_min, height],
+                 [trans_job, status1, trans_timer, b1])
+        trans_timer.tick(poll_step1, trans_job,
+                         [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
+                         show_progress="hidden")
+        b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
+                         height, fps, preset, max_speed, crop, flip, zoom,
+                         sub, sub_size, sub_pos, neon, sweep, split_on, split_min],
+                 [video, dl, status2])
+        b3.click(reset_all, pdir_state,
+                 [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
+                  pv_img, video, dl, status2])
+
+    ok = set(inspect.signature(demo.launch).parameters)
+    lk = {k: v for k, v in launch_kw.items() if k in ok}
+    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True, **lk)
 
 
 def main(argv=None):
@@ -2058,423 +2291,9 @@ def main(argv=None):
         sys.exit(f"\n❌ {ex}")
 
 
-# ======================================================================
-# Web UI (Gradio)
-# ======================================================================
-import hashlib
-import uuid
-
-import gradio as gr
-
-recap = sys.modules[__name__]   # UI code below calls recap.X; engine lives in this same file
-
-BASE = os.path.join(os.getcwd(), "work_ui")
-os.makedirs(BASE, exist_ok=True)
-PORT = int(os.environ.get("PORT", "7860"))
-
-LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "ဂျပန်": "ja"}
-
-
-def voices_for(code):
-    return [v for v, _ in LANG_CONF[code]["edge_voices"]]
-
-
-def _path(f):
-    if not f:
-        return ""
-    return f if isinstance(f, str) else getattr(f, "name", "")
-
-
-def _cb(progress):
-    return lambda frac, label=None: progress(frac, desc=label or "")
-
-
-def _source(url, upload):
-    up = _path(upload)
-    return up or extract_url(url or "")
-
-
-def _pbar(frac, width=20):
-    frac = max(0.0, min(float(frac), 1.0))
-    fill = int(width * frac)
-    return "█" * fill + "░" * (width - fill)
-
-
-def _ensure_video(url, upload, height, cb):
-    source = _source(url, upload)
-    if not source:
-        raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
-    key = source
-    if os.path.isfile(source):
-        key += f"|{os.path.getsize(source)}"
-    pdir = os.path.join(BASE, hashlib.md5(key.encode()).hexdigest()[:10])
-    dl_prog = Progress(0.0, 1.0, parent=lambda f, l=None: cb(f, "Video ယူနေတယ်..."))
-    proj = init_project(pdir, source, int(height), os.environ.get("YT_COOKIES"), dl_prog)
-    return pdir, proj
-
-
-# ---------------------------------------------------------------- fetch + preview
-FETCH = {}   # job id -> state (background download jobs)
-
-
-def start_fetch(url, upload, height):
-    """ခလုတ်နှိပ်တာနဲ့ ချက်ချင်း return လုပ်ပြီး download ကို နောက်ကွယ်မှာ စတင်မယ်။"""
-    if not _source(url, upload):
-        raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
-    jid = uuid.uuid4().hex[:8]
-    st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None,
-          "done": False, "t0": time.time()}
-    FETCH[jid] = st
-
-    def cb(f, label=None):
-        st["f"] = max(0.0, min(float(f), 1.0))
-        if label:
-            st["label"] = label
-
-    def work():
-        try:
-            st["res"] = _ensure_video(url, upload, height, cb)
-        except BaseException as ex:
-            st["err"] = ex
-        finally:
-            st["done"] = True
-
-    threading.Thread(target=work, daemon=True).start()
-    return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
-
-
-def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
-               pv_t):
-    """Timer က ၁ စက္ကန့်တစ်ခါ ခေါ်မယ် — % ပြ၊ ပြီးရင် Preview ထုတ်ပြီး timer ရပ်။"""
-    st = FETCH.get(jid) if jid else None
-    if st is None:
-        return gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
-    elapsed = time.time() - st["t0"]
-    if not st["done"]:
-        if st["f"] >= 1.0:
-            msg = "🔄 MP4 ပြင်ဆင်နေတယ် (ဖိုင်ကြီးရင် ခဏကြာမယ်)"
-        else:
-            msg = f"⬇️ {st['label']} {int(st['f'] * 100)}%"
-        return gr.skip(), f"{msg} · {elapsed:.0f}s", gr.skip(), gr.skip()
-    FETCH.pop(jid, None)
-    if st["err"] is not None:
-        return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.Timer(active=False)
-    pdir, proj = st["res"]
-    mb = os.path.getsize(proj.video) / 1e6
-    img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
-                   sweep, pv_t, False)
-    return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ",
-            img, gr.Timer(active=False))
-
-
-def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
-             pv_t, strict):
-    if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
-        if strict:
-            raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
-        return gr.skip()
-    code = LANGS[lang_name]
-    try:
-        proj = Project.load(pdir)
-        s = proj.settings
-        s.lang, s.height, s.zoom = code, int(height), float(zoom)
-        s.crop, s.flip, s.sub, s.neon = bool(crop), bool(flip), bool(sub), bool(neon)
-        s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
-        s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
-        font = find_font(code, s.font) if s.sub else None
-
-        # ဖိုင်နာမည် အသစ်ပေးမှ browser/gradio cache မကပ်ဘဲ preview ပြောင်းမယ်
-        for old in glob.glob(os.path.join(pdir, "preview_*.png")):
-            try:
-                os.remove(old)
-            except OSError:
-                pass
-        out = os.path.join(pdir, f"preview_{int(time.time() * 1000)}.png")
-        make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
-                           LANG_CONF[code]["is_mm"], float(pv_t or 0.0))
-        return out
-    except Exception as ex:
-        log(f"preview error: {ex}")
-        if strict:
-            raise gr.Error(str(ex)[:400])
-        return gr.skip()
-
-
-def preview_btn(*a):
-    return _preview(*a, True)
-
-
-def preview_auto(*a):
-    return _preview(*a, False)
-
-
-# ---------------------------------------------------------------- step 1 (whisper) + live %
-TRANS = {}   # job id -> state (background Whisper jobs)
-
-
-def start_step1(url, upload, lang_name, model, src_lang, max_min, height):
-    """1️⃣ ခလုတ်နှိပ်တာနဲ့ ချက်ချင်း return လုပ်ပြီး Whisper ကို နောက်ကွယ်မှာ run ပြီး၊
-    Timer က ၁ စက္ကန့်တစ်ခါ % ကို ပြမယ်။"""
-    if not _source(url, upload):
-        raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
-    code = LANGS[lang_name]
-    jid = uuid.uuid4().hex[:8]
-    st = {"f": 0.0, "label": "စတင်နေတယ်...", "res": None, "err": None,
-          "done": False, "t0": time.time()}
-    TRANS[jid] = st
-
-    def cb(f, label=None):
-        st["f"] = max(0.0, min(float(f), 1.0))
-        if label:
-            st["label"] = label
-
-    def work():
-        try:
-            cb(0.0, "Video ယူနေတယ်...")
-            pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
-            tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
-            info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
-            chunks = build_prompt_chunks(proj.units, code)
-            st["res"] = (pdir, info, chunks)
-        except BaseException as ex:
-            st["err"] = ex
-        finally:
-            st["done"] = True
-
-    threading.Thread(target=work, daemon=True).start()
-    return jid, "⏳ စတင်နေတယ်... 0%", gr.Timer(active=True), gr.update(interactive=False)
-
-
-def poll_step1(jid):
-    """Timer tick — % + progress bar ပြ၊ ပြီးရင် Prompt အပိုင်းတွေ ထုတ်ပြီး timer ရပ်။"""
-    st = TRANS.get(jid) if jid else None
-    if st is None:
-        return (gr.skip(), gr.skip(), gr.skip(), gr.skip(),
-                gr.Timer(active=False), gr.update(interactive=True))
-    elapsed = time.time() - st["t0"]
-    if not st["done"]:
-        pct = int(st["f"] * 100)
-        msg = f"⏳ {st['label']}\n\n`[{_pbar(st['f'])}] {pct}%` · {elapsed:.0f}s"
-        return gr.skip(), msg, gr.skip(), gr.skip(), gr.skip(), gr.skip()
-    TRANS.pop(jid, None)
-    if st["err"] is not None:
-        return (gr.skip(), f"❌ {str(st['err'])[:500]}", gr.skip(), gr.skip(),
-                gr.Timer(active=False), gr.update(interactive=True))
-    pdir, info, chunks = st["res"]
-    return (pdir,
-            f"✅ 100% · {info} · Prompt {len(chunks)} ပိုင်း · {elapsed:.0f}s",
-            chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
-
-
-# ---------------------------------------------------------------- step 2 (tts + render + split)
-def step2(pdir, translated, parts, lang_name, engine, voice, rate, workers, vox_ref,
-          height, fps, preset, max_speed, crop, flip, zoom,
-          sub, sub_size, sub_pos, neon, sweep, split_min, progress=gr.Progress()):
-    if not pdir or not os.path.isdir(pdir):
-        raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
-    code = LANGS[lang_name]
-    try:
-        proj = Project.load(pdir)
-        if not proj.units:
-            raise RuntimeError("1️⃣ စာသားထုတ် ကို အရင်လုပ်ပါ")
-        text = "\n".join((parts or {})[k] for k in sorted(parts or {})) + "\n" + (translated or "")
-        got, missing = apply_translation(proj, text, code)
-        if missing:
-            raise RuntimeError(f"ဘာသာပြန် မပြည့်သေးဘူး ({got}/{len(proj.units)}) · မပါတာ: {missing[:15]}")
-        s = proj.settings
-        s.lang, s.engine = code, ("vox" if engine == "VoxCPM" else "edge")
-        s.voice = voice if voice in voices_for(code) else ""
-        s.rate, s.tts_workers = int(rate), int(workers)
-        s.vox_ref = _path(vox_ref)
-        s.height, s.fps, s.preset = int(height), int(fps), preset
-        s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
-        s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
-        s.sub_sweep = bool(sweep)
-        s.split_min = max(0.0, float(split_min or 0))
-        s.neon_speed = Settings().neon_speed   # always use the current default speed in the UI
-        # render = 0 → 0.9 , split = 0.9 → 1.0
-        prog = Progress(0.0, 1.0, parent=_cb(progress))
-        res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None,
-                         os.environ.get("HF_TOKEN") or None, prog.sub(0.0, 0.9))
-    except gr.Error:
-        raise
-    except Exception as ex:
-        raise gr.Error(str(ex)[:600])
-
-    # old results out; unique file name so the browser never shows a stale/blank cached video
-    # (pattern also removes the old *_partNN.mp4 files)
-    for old in glob.glob(os.path.join(pdir, "final_*.mp4")):
-        try:
-            os.remove(old)
-        except OSError:
-            pass
-    stamp = int(time.time())
-    out = os.path.join(pdir, f"final_{code}_{stamp}.mp4")
-    shutil.copy(res["final"], out)
-    mb = os.path.getsize(out) / 1e6
-
-    files = [out]
-    split_note = ""
-    if s.split_min > 0:
-        try:
-            parts_out = split_video(out, os.path.splitext(out)[0], s.split_min,
-                                    prog.sub(0.9, 1.0))
-        except Exception as ex:
-            raise gr.Error(f"အပိုင်းခွဲလို့ မရပါ: {str(ex)[:400]}")
-        if len(parts_out) > 1:
-            files = parts_out
-            durs = [probe_duration(p) for p in parts_out]
-            split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း ခွဲပြီး · "
-                          + " · ".join(f"P{k + 1} {fmt_t(d)}" for k, d in enumerate(durs)))
-        else:
-            split_note = f"\n\n✂️ video က {s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ"
-
-    return (out, files,
-            f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
-            + split_note)
-
-
-def reset_all(pdir):
-    if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
-        shutil.rmtree(pdir, ignore_errors=True)
-    # pdir_state, status_fetch, status1, chunks_state, parts_state, translated, pv_img, video, dl, status2
-    return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
-
-
-def make_setter(lo, hi):
-    """Returns a handler for one part's paste box: stores the text + shows ✅/⚠️ status."""
-    def f(text, parts):
-        parts = dict(parts or {})
-        text = text or ""
-        parts[lo] = text          # key = part's first line number
-        if not text.strip():
-            return parts, "⏳ မဖြည့်သေး"
-        got, missing = check_part(text, lo, hi)
-        if missing:
-            return parts, f"⚠️ {len(got)}/{hi - lo} · မပါတာ: {missing[:10]}"
-        return parts, f"✅ {hi - lo}/{hi - lo}"
-    return f
-
-
-# ---------------------------------------------------------------- UI layout
-with gr.Blocks(title="Recap → Multi-Language") as demo:
-    gr.Markdown("# 🎙️ Recap → Multi-Language  `build 16`\nWhisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS / VoxCPM → Smart Sync → စာတန်း (music sweep) + Neon → ✂️ အပိုင်းခွဲ Download")
-    pdir_state = gr.State("")
-
-    # hidden settings (UI မှာ မပြဘူး) — တန်ဖိုးတွေက နောက်ကွယ်မှာ ပုံသေအတိုင်း အလုပ်လုပ်တယ်
-    height = gr.State(720)
-    fps = gr.State(24)
-    preset = gr.State("ultrafast")
-    max_speed = gr.State(1.25)
-    crop = gr.State(True)
-    model = gr.State("base")
-    src_lang = gr.State("auto")
-    max_min = gr.State(0)       # 0 = unlimited
-    translated = gr.State("")   # "ရလဒ်အကုန် တစ်ခါတည်း paste" box ကို ဖျောက်ထားတယ် (step2 အတွက် အလွတ်ပဲ ပို့မယ်)
-
-    with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
-        lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
-        engine = gr.Radio(["Edge TTS", "VoxCPM"], value="Edge TTS", label="TTS engine")
-        voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="Edge voice")
-        with gr.Row():
-            rate = gr.Slider(-50, 100, value=45, step=5, label="Edge speed %")
-            workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
-        vox_ref = gr.File(label="🎤 VoxCPM reference audio (optional)", type="filepath")
-        lang.change(lambda l: gr.update(choices=voices_for(LANGS[l]), value=voices_for(LANGS[l])[0]),
-                    lang, voice)
-
-    gr.Markdown("### 📥 Video")
-    url = gr.Textbox(label="Video link (mp4 / Google Drive / Dropbox / YouTube / FB / TikTok ...) — paste ပြီး Enter",
-                     placeholder="https://...")
-    upload = gr.File(label="(သို့) Video ဖိုင်တင်", type="filepath",
-                     file_types=[".mp4", ".mov", ".mkv", ".webm", ".m4v"])
-    b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
-    status_fetch = gr.Markdown()
-
-    gr.Markdown("### 🎨 စာတန်း / Neon (Preview ကြည့်ပြီး ချိန်ပါ)")
-    pv_img = gr.Image(label="Preview", type="filepath", interactive=False)
-    pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
-                     label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့် · ဆွဲပြီး ရွှေ့ကြည့်ပါ)")
-    with gr.Accordion("🎛️ စာတန်း / Neon / Mirror", open=False):
-        with gr.Row():
-            sub = gr.Checkbox(True, label="စာတန်း")
-            sweep = gr.Checkbox(True, label="🎵 Music sweep")
-            neon = gr.Checkbox(True, label="Neon")
-            flip = gr.Checkbox(True, label="Mirror")
-        sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
-        sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
-        zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
-
-    pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep, pv_t]
-    fetch_job = gr.State("")
-    fetch_timer = gr.Timer(1.0, active=False)
-    for trig in (url.submit, b_fetch.click, upload.upload):
-        trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
-    fetch_timer.tick(poll_fetch,
-                     [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
-                      sweep, pv_t],
-                     [pdir_state, status_fetch, pv_img, fetch_timer],
-                     show_progress="hidden")
-
-    # Slider: .release က phone (touch) မှာ မခံစားရလို့ .change သုံးတယ်၊
-    # always_last = ဆွဲနေတုန်း တန်းစီမနေဘဲ နောက်ဆုံးတန်ဖိုးပဲ ယူမယ်
-    for c in (sub_size, sub_pos, zoom, sub, sweep, neon, flip, lang, pv_t):
-        c.change(preview_auto, pv_in, pv_img,
-                 trigger_mode="always_last", show_progress="hidden", queue=True)
-
-    gr.Markdown("### 1️⃣ စာသားထုတ်")
-    b1 = gr.Button("1️⃣ စာသားထုတ် (Whisper)", variant="primary")
-    status1 = gr.Markdown()
-    trans_job = gr.State("")
-    trans_timer = gr.Timer(1.0, active=False)
-
-    chunks_state = gr.State([])
-    parts_state = gr.State({})
-
-    # ">" မြှားလေးနဲ့ ခေါက်/ဖွင့် လုပ်လို့ရတဲ့ Prompt အပိုင်းများ
-    with gr.Accordion("📋 Prompt အပိုင်းများ (၅၀ ကြောင်းစီ) — Copy → Gemini → ရလဒ်ကို အောက်က box မှာ paste",
-                      open=False):
-
-        @gr.render(inputs=chunks_state)
-        def show_chunks(chunks):
-            if not chunks:
-                gr.Markdown("_1️⃣ နှိပ်ပြီးရင် Prompt အပိုင်းတွေ ဒီမှာ ပေါ်မယ်_")
-                return
-            for k, c in enumerate(chunks):
-                with gr.Accordion(f"Part {k + 1}/{len(chunks)} · [{c['lo']} – {c['hi'] - 1}]",
-                                  open=False):
-                    gr.Textbox(value=c["text"], lines=3, max_lines=5, interactive=False,
-                               show_copy_button=True, label="① Prompt (Copy ခလုတ်နှိပ်)")
-                    box = gr.Textbox(label=f"② Gemini ရလဒ် Part {k + 1} ကို ဒီမှာ paste",
-                                     lines=3, max_lines=5)
-                    st = gr.Markdown("⏳ မဖြည့်သေး")
-                    box.change(make_setter(c["lo"], c["hi"]), [box, parts_state], [parts_state, st])
-
-    gr.Markdown("### 2️⃣ အသံထုတ် + Video")
-    split_min = gr.Slider(0, 10, value=2, step=0.5,
-                          label="✂️ Download အပိုင်းခွဲ (မိနစ်) · 0 = မခွဲဘူး · ကျန်တဲ့ စက္ကန့်တွေကို နောက်ဆုံးအပိုင်းမှာ ပေါင်းထည့်မယ်")
-    b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
-    status2 = gr.Markdown()
-    # autoplay=True -> result shows/plays right away (no need to tap to make it appear)
-    video = gr.Video(label="ရလဒ်", autoplay=True)
-    dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲထားရင် ဖိုင်တစ်ခုချင်း နှိပ်ဒေါင်း)",
-                 file_count="multiple")
-    b3 = gr.Button("🗑️ အသစ်ပြန်စ")
-
-    # 1️⃣ Whisper: ခလုတ်နှိပ်ရင် job စပြီး Timer က status1 မှာ % ကို ၁ စက္ကန့်တစ်ခါ update လုပ်မယ်
-    b1.click(start_step1, [url, upload, lang, model, src_lang, max_min, height],
-             [trans_job, status1, trans_timer, b1])
-    trans_timer.tick(poll_step1, trans_job,
-                     [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
-                     show_progress="hidden")
-
-    b2.click(step2, [pdir_state, translated, parts_state, lang, engine, voice, rate, workers,
-                     vox_ref, height, fps, preset, max_speed, crop, flip, zoom,
-                     sub, sub_size, sub_pos, neon, sweep, split_min],
-             [video, dl, status2])
-    b3.click(reset_all, pdir_state,
-             [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-              pv_img, video, dl, status2])
-
 if __name__ == "__main__":
-    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True)
+    # no arguments -> web UI (same behaviour as before); otherwise CLI
+    if len(sys.argv) == 1:
+        launch_ui()
+    else:
+        main()
