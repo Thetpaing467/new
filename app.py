@@ -7,7 +7,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 import argparse
 import asyncio
@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw, ImageFont, features
 # ======================================================================
 # config
 # ======================================================================
-TARGET, MAXD = 4.2, 5.6          # Whisper segment merge targets (seconds)
+TARGET, MAXD = 8.0, 12.0         # Whisper segment merge targets (seconds) · bigger = more recap-like
 SUB_LINES = 2                    # subtitle box always has this many text lines
 PREVIEW_SECS = 5.0               # preview scrub range (seconds)
 CHUNK = 100                      # lines per Gemini prompt part (same chat -> Gemini remembers the story)
@@ -64,21 +64,31 @@ _HUMAN = (
     "Do NOT use ellipsis (...), emoji, brackets, asterisks or stage directions. "
 )
 
-# Recap mode: condense instead of literal translation (used in the main prompt of every language).
+# Recap mode: retell, do NOT translate (used in the main prompt of every language).
 _RECAP_MODE = (
-    "RECAP MODE (very important): first read ALL numbered lines below and understand the whole "
-    "story: who the characters are, what happens, and why. Then retell each line as recap "
-    "narration, not as a translation. You MAY condense: drop filler, repeated words, small talk "
-    "and unimportant details, and keep only what moves the story (who did what, why, the result, "
-    "the emotion). Each output line should be about 50-70% as long as a literal translation. "
-    "Never leave a line empty: if a line is unimportant, write one very short bridge sentence. "
-    "Do NOT move content between lines and do NOT invent events that are not in the source. "
+    "RECAP MODE (very important): this is NOT a translation job. First read ALL numbered "
+    "lines and understand the whole story: who the characters are, what happens, and why. "
+    "Then retell it as a narrator who watched the episode and is summarising it for a friend. "
+    "The source lines are only raw material. Do NOT follow their wording or sentence order. "
+    "Ask yourself for each line: does this move the story? "
+    "- Plot-moving lines (who did what, why, the result, a twist, a strong emotion): retell "
+    "in ONE short, vivid sentence. "
+    "- Small talk, greetings, repeated words, filler, explanations of things already clear: "
+    "DROP the content and write only a 2-4 word bridge (e.g. an action or a connector). "
+    "- If several neighbouring lines are about the same moment, put the whole summary into "
+    "the FIRST of them and give the others only a very short bridge. "
+    "Overall the output must be about 40-50% of a literal translation. If a line sounds like "
+    "a translation of the source, rewrite it as narration. "
+    "Keep the numbering and the line count exactly the same, but the CONTENT may be "
+    "redistributed inside a group of neighbouring lines. Never invent events that are not in "
+    "the source. "
 )
 
 # Reminder used at the top of every later part (chat memory keeps the story, this keeps the style).
 _RECAP_NOTE = (
-    "Continue in the same RECAP MODE as the earlier parts: condense, keep only story-moving "
-    "content, about 50-70% of a literal translation, never leave a line empty. "
+    "Continue in the same RECAP MODE: retell, do not translate; summarise groups of "
+    "neighbouring lines into the first line, short bridges for the rest; about 40-50% of a "
+    "literal translation. "
 )
 
 # Language-neutral drama-recap rules (shared by every language).
@@ -366,7 +376,7 @@ class Settings:
     height: int = 720
     fps: int = 24
     preset: str = "ultrafast"
-    max_speed: float = 1.25
+    max_speed: float = 1.5        # recap lines are shorter -> video may need to speed up more
     crop: bool = True             # auto-remove black bars
     flip: bool = True             # mirror horizontally
     zoom: float = 1.0
@@ -1718,7 +1728,7 @@ def add_style_args(p):
     g.add_argument("--height", type=int, choices=[360, 480, 720, 1080], default=SUP)
     g.add_argument("--fps", type=int, choices=[20, 24, 25, 30], default=SUP)
     g.add_argument("--preset", choices=["ultrafast", "superfast", "veryfast"], default=SUP)
-    g.add_argument("--max-speed", type=float, default=SUP, help="max video speed-up (1.0-2.0)")
+    g.add_argument("--max-speed", type=float, default=SUP, help="max video speed-up (1.0-2.0, default 1.5)")
     g.add_argument("--zoom", type=float, default=SUP, help="1.0-1.25")
     g.add_argument("--no-crop", dest="crop", action="store_false", default=SUP,
                    help="black bar auto-crop မလုပ်ဘူး")
@@ -2273,7 +2283,7 @@ def launch_ui():
         height = gr.State(720)
         fps = gr.State(24)
         preset = gr.State("ultrafast")
-        max_speed = gr.State(1.25)
+        max_speed = gr.State(1.5)
         crop = gr.State(True)
         model = gr.State("base")
         src_lang = gr.State("auto")
@@ -2383,9 +2393,6 @@ def launch_ui():
                          height, fps, preset, max_speed, crop, flip, zoom,
                          sub, sub_size, sub_pos, neon, sweep, split_on, split_min],
                  [video, dl, status2])
-        b3.click(reset_all, pdir_state,
-                 [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-                  pv_img, video, dl, status2])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
