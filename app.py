@@ -7,7 +7,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 
 import argparse
 import asyncio
@@ -41,7 +41,7 @@ from PIL import Image, ImageDraw, ImageFont, features
 TARGET, MAXD = 4.2, 5.6          # Whisper segment merge targets (seconds)
 SUB_LINES = 2                    # subtitle box always has this many text lines
 PREVIEW_SECS = 5.0               # preview scrub range (seconds)
-CHUNK = 50                       # lines per Gemini prompt part
+CHUNK = 100                      # lines per Gemini prompt part (same chat -> Gemini remembers the story)
 
 # Trim leading/trailing silence from each TTS clip, then pad 0.2s
 TRIM = (
@@ -62,6 +62,23 @@ _HUMAN = (
     "breathing pause; use everyday spoken wording instead of stiff, literary or textbook wording; "
     "let emotion match the scene (tension, surprise, sadness, relief). {accent} "
     "Do NOT use ellipsis (...), emoji, brackets, asterisks or stage directions. "
+)
+
+# Recap mode: condense instead of literal translation (used in the main prompt of every language).
+_RECAP_MODE = (
+    "RECAP MODE (very important): first read ALL numbered lines below and understand the whole "
+    "story: who the characters are, what happens, and why. Then retell each line as recap "
+    "narration, not as a translation. You MAY condense: drop filler, repeated words, small talk "
+    "and unimportant details, and keep only what moves the story (who did what, why, the result, "
+    "the emotion). Each output line should be about 50-70% as long as a literal translation. "
+    "Never leave a line empty: if a line is unimportant, write one very short bridge sentence. "
+    "Do NOT move content between lines and do NOT invent events that are not in the source. "
+)
+
+# Reminder used at the top of every later part (chat memory keeps the story, this keeps the style).
+_RECAP_NOTE = (
+    "Continue in the same RECAP MODE as the earlier parts: condense, keep only story-moving "
+    "content, about 50-70% of a literal translation, never leave a line empty. "
 )
 
 # Language-neutral drama-recap rules (shared by every language).
@@ -237,8 +254,8 @@ _STORY_DE = (
 def _tail(script, accent, story):
     """Common prompt tail. Built with plain concatenation (no str.format) so braces are safe."""
     return (
-        "Rules: do NOT summarize, shorten or skip; do NOT move content between lines; "
-        "keep character names consistent across all lines; " + script + " "
+        _RECAP_MODE
+        + "Keep character names consistent across all lines; " + script + " "
         + _HUMAN.replace("{accent}", accent) + _STORY_CORE + story +
         "Output exactly one line per input line in the format [number] text "
         "-- same numbers, same count, no extra comments, no headings, no blank lines, "
@@ -258,7 +275,7 @@ LANG_CONF = {
         ],
         "sentence_end": r"(?<=။)",
         "prompt": (
-            "You are a Burmese (Myanmar) movie/drama recap narrator. Translate every numbered "
+            "You are a Burmese (Myanmar) movie/drama recap narrator. Turn every numbered "
             "line below into natural spoken Burmese recap narration (calm third-person storyteller "
             "style). "
             + _tail(
@@ -270,6 +287,7 @@ LANG_CONF = {
                 story=_STORY_MY)
         ),
         "chunk_note": (
+            _RECAP_NOTE +
             "Keep the same calm third-person recap voice, the same ending style (mostly ပါတယ်။), "
             "and the same name spellings as the other parts. Never use ကျွန်တော် or ဗျ. "
             "When a name is unknown never write လူတစ်ယောက် — use a role word or leave the subject out."
@@ -302,6 +320,7 @@ LANG_CONF = {
                 story=_STORY_DE)
         ),
         "chunk_note": (
+            _RECAP_NOTE +
             "Keep character names, their spelling and role words exactly the same as in the other "
             "parts. Keep the same tense (Präsens) and the same relaxed spoken German tone as in "
             "all other parts. Never use Konjunktiv I. Vary reporting verbs and sentence openings; "
@@ -1775,7 +1794,7 @@ def cmd_transcribe(args, proj=None):
     prog.done()
     nparts = len(build_prompt_chunks(proj.units, lang))
     print(f"✅ {info}\n   Prompt: {proj.prompt_file}  (+ prompt_part01..{nparts:02d}.txt · {CHUNK} ကြောင်းစီ)")
-    print("   → prompt_partNN.txt ကို တစ်ခုချင်း Gemini ထဲ paste၊ ရလဒ်အကုန်ကို translated.txt ထဲ အစဉ်လိုက်ထည့်ပြီး `apply` လုပ်ပါ")
+    print("   → prompt_partNN.txt ကို Gemini chat တစ်ခုတည်းမှာ အစဉ်လိုက် paste၊ ရလဒ်အကုန်ကို translated.txt ထဲ အစဉ်လိုက်ထည့်ပြီး `apply` လုပ်ပါ")
     return proj
 
 
@@ -1874,7 +1893,7 @@ def cmd_run(args):
     src = args.translated or proj.translated_file
     if not os.path.exists(src):
         print(f"\n📋 Prompt: {proj.prompt_file}  (အပိုင်းခွဲ: prompt_partNN.txt)")
-        print(f"   ① prompt_partNN.txt ကို Gemini မှာ တစ်ခုချင်း paste  ② ရလဒ်အကုန်ကို {src} မှာ အစဉ်လိုက် သိမ်း")
+        print(f"   ① prompt_partNN.txt ကို Gemini chat တစ်ခုတည်းမှာ အစဉ်လိုက် paste  ② ရလဒ်အကုန်ကို {src} မှာ အစဉ်လိုက် သိမ်း")
         if not sys.stdin.isatty():
             sys.exit(f"\n⏸️ translated ဖိုင်မရှိလို့ ရပ်လိုက်တယ်။ ဖြည့်ပြီးရင် `run ... --translated {src}` "
                      "(သို့) `apply` + `render` လုပ်ပါ")
@@ -2247,8 +2266,8 @@ def launch_ui():
 
     # ---------------- layout
     with gr.Blocks(**blocks_kw) as demo:
-        gr.Markdown("# 🎙️ Recap → Burmese / German  `build 19`\n"
-                    "Whisper → Gemini (၅၀ ကြောင်းစီ) → Edge TTS → Smart Sync → စာတန်း + Neon → 🎵 BGM ducking → ✂️ အပိုင်းခွဲ (ON/OFF)")
+        gr.Markdown(f"# 🎙️ Recap → Burmese / German  `v{__version__}`\n"
+                    f"Whisper → Gemini (Recap mode · {CHUNK} ကြောင်းစီ · chat တစ်ခုတည်း) → Edge TTS → Smart Sync → စာတန်း + Neon → 🎵 BGM ducking → ✂️ အပိုင်းခွဲ (ON/OFF)")
         pdir_state = gr.State("")
 
         height = gr.State(720)
@@ -2323,7 +2342,7 @@ def launch_ui():
         chunks_state = gr.State([])
         parts_state = gr.State({})
 
-        with gr.Accordion("📋 Prompt အပိုင်းများ (၅၀ ကြောင်းစီ) — Copy → Gemini → ရလဒ်ကို အောက်က box မှာ paste",
+        with gr.Accordion(f"📋 Prompt အပိုင်းများ ({CHUNK} ကြောင်းစီ) — Gemini chat တစ်ခုတည်းမှာ Part 1 ကနေ အစဉ်လိုက် Copy → paste → ရလဒ်ကို အောက်က box မှာ paste",
                           open=False):
 
             @gr.render(inputs=chunks_state)
@@ -2391,3 +2410,5 @@ if __name__ == "__main__":
         launch_ui()
     else:
         main()
+
+      
