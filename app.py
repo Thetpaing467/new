@@ -7,7 +7,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.10.0"
+__version__ = "1.11.0"
 
 import argparse
 import asyncio
@@ -1083,6 +1083,7 @@ def detect_crop(src):
 
 
 def prepare_video(src, dst, target_h, crop=True):
+    """Used only by the preview clip now (render_final crops/scales in-process)."""
     target_h = int(target_h) // 2 * 2
     vf = None
     if crop:
@@ -1108,12 +1109,25 @@ def prepare_video(src, dst, target_h, crop=True):
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
-    tmp_vid = out + "_prep.mp4"
-    W, H = prepare_video(src, tmp_vid, s.height, s.crop)
-
-    cap = cv2.VideoCapture(tmp_vid)
+    # --- crop + scale happen inside the frame producer (no separate prepare/encode pass)
+    cap = cv2.VideoCapture(src)
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     sfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     stotal = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 10 ** 9
+
+    c = detect_crop(src) if s.crop else None
+    if c and c[1] < src_h * 0.95 and c[0] > 0 and c[1] > 0:
+        cw, ch, cx, cy = c
+        cw, ch = min(cw, src_w - cx), min(ch, src_h - cy)
+    else:
+        cw, ch, cx, cy = src_w, src_h, 0, 0
+    need_crop = (cw, ch) != (src_w, src_h)
+    H = int(s.height) // 2 * 2
+    W = int(round(cw * H / ch / 2)) * 2
+    need_resize = (W, H) != (cw, ch)
+    interp = cv2.INTER_AREA if H < ch else cv2.INTER_LINEAR
+
     fps_out = int(s.fps)
     nfr = max(1, int(round(total * fps_out)))
     fs = max(16, int(W * s.sub_size / 100))
@@ -1154,8 +1168,10 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                 if new:
                     ok, f = cap.retrieve()
                     if ok:
-                        if f.shape[1] != W or f.shape[0] != H:
-                            f = cv2.resize(f, (W, H))
+                        if need_crop:
+                            f = f[cy:cy + ch, cx:cx + cw]
+                        if need_resize or f.shape[1] != W or f.shape[0] != H:
+                            f = cv2.resize(f, (W, H), interpolation=interp)
                         last = f
                 if last is None:
                     return
@@ -1163,12 +1179,17 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         finally:
             put(None)
 
+    # force a keyframe at every split boundary so split_video can use `-c copy`
+    kf = []
+    if s.split and s.split_min and s.split_min > 0:
+        kf = ["-force_key_frames", f"expr:gte(t,n_forced*{float(s.split_min) * 60.0:g})"]
+
     log_path = out + ".log"
     log_fh = open(log_path, "wb")
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
            "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-i", audio,
            "-map", "0:v", "-map", "1:a:0",
-           "-c:v", "libx264", "-preset", s.preset, "-crf", "27", "-pix_fmt", "yuv420p",
+           "-c:v", "libx264", "-preset", s.preset, "-crf", "27", *kf, "-pix_fmt", "yuv420p",
            "-threads", "0", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
            "-t", f"{total:.3f}", out]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_fh)
@@ -1222,8 +1243,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         except Exception:
             pass
         log_fh.close()
-        if os.path.exists(tmp_vid):
-            os.remove(tmp_vid)
 
     if proc.returncode != 0:
         with open(log_path, "rb") as f:
@@ -1254,8 +1273,12 @@ def split_plan(total, seg_secs):
     return plan
 
 
-def split_video(src, out_prefix, seg_min=2.0, progress=None):
-    """Cut `src` into <out_prefix>_part01.mp4 ... Returns part paths (or [src] if no split)."""
+def split_video(src, out_prefix, seg_min=2.0, progress=None, reencode=False):
+    """Cut `src` into <out_prefix>_part01.mp4 ... Returns part paths (or [src] if no split).
+
+    Default is stream copy (instant). render_final forces a keyframe at every split boundary,
+    so the cuts are accurate. Pass reencode=True for videos that were NOT rendered by this
+    version (e.g. an old final.mp4)."""
     total = probe_duration(src)
     plan = split_plan(total, float(seg_min) * 60.0)
     if len(plan) <= 1:
@@ -1263,9 +1286,14 @@ def split_video(src, out_prefix, seg_min=2.0, progress=None):
     outs, n = [], len(plan)
     for k, (st, dur) in enumerate(plan):
         out = f"{out_prefix}_part{k + 1:02d}.mp4"
-        sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-i", src, "-t", f"{dur:.3f}",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out])
+        if reencode:
+            sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-i", src, "-t", f"{dur:.3f}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out])
+        else:
+            sh(["ffmpeg", "-y", "-ss", f"{st:.3f}", "-i", src, "-t", f"{dur:.3f}",
+                "-c", "copy", "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart", out])
         outs.append(out)
         if progress:
             progress((k + 1) / n, f"အပိုင်းခွဲနေတယ် {k + 1}/{n}")
