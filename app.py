@@ -349,6 +349,23 @@ def resolve_lang(value):
     raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de)")
 
 
+def parse_rgb(s, default=(0, 0, 0)):
+    """'R,G,B' (or 'R G B' / '#RRGGBB') -> tuple[int,int,int]."""
+    if not s:
+        return default
+    s = str(s).strip()
+    try:
+        if s.startswith("#") and len(s) == 7:
+            return (int(s[1:3], 16), int(s[3:5], 16), int(s[5:7], 16))
+        parts = re.split(r"[,\s]+", s)
+        rgb = [max(0, min(255, int(float(x)))) for x in parts[:3]]
+        while len(rgb) < 3:
+            rgb.append(0)
+        return tuple(rgb)
+    except Exception:
+        return default
+
+
 @dataclass
 class Settings:
     # TTS (Edge only)
@@ -378,6 +395,7 @@ class Settings:
     sub_size: float = 7.0         # % of width
     sub_pos: int = 90             # 0 = top, 100 = bottom
     sub_alpha: int = 204
+    sub_color: str = "0,0,0"      # subtitle box background R,G,B  (default: black)
     sub_sweep: bool = True        # music-style light sweep across the subtitle
     font: str = ""                # explicit font path
     # Neon
@@ -641,7 +659,9 @@ SWEEP_BAND = np.array([255, 255, 235], np.float32)
 
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 255),
-                  layout="raqm", is_mm=True):
+                  layout="raqm", is_mm=True, box_rgb=(0, 0, 0)):
+    """box_rgb : subtitle box background (R,G,B).  Default black (0,0,0).
+    With alpha=0 the box disappears completely and only the outlined text remains."""
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     ink_img = Image.new("L", (W, H), 0)
@@ -663,8 +683,11 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     if not lines:
         return None
 
-    d.rounded_rectangle([0, box_y, W, box_y + box_h], radius=int(fs * 0.66),
-                        fill=(0, 0, 0, alpha))
+    if alpha > 0:
+        rgb = tuple(int(max(0, min(255, int(x)))) for x in (box_rgb or (0, 0, 0)))[:3]
+        d.rounded_rectangle([0, box_y, W, box_y + box_h], radius=int(fs * 0.66),
+                            fill=(rgb[0], rgb[1], rgb[2], int(alpha)))
+
     ink = (int(color[0]), int(color[1]), int(color[2]), 255)
     sw = max(1, round(cur_fs / 15))
     lh = int(cur_fs * 1.4)
@@ -1151,7 +1174,9 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     nfr = max(1, int(round(total * fps_out)))
     fs = max(16, int(W * s.sub_size / 100))
     neon = Neon(W, H, s.neon_th, s.neon_speed) if s.neon else None
-    style = {"alpha": int(s.sub_alpha), "color": (255, 255, 255), "layout": "raqm"}
+    box_rgb = parse_rgb(s.sub_color, (0, 0, 0))
+    style = {"alpha": int(s.sub_alpha), "color": (255, 255, 255), "layout": "raqm",
+             "box_rgb": box_rgb}
 
     q = queue.Queue(maxsize=32)
     stop = threading.Event()
@@ -1392,7 +1417,8 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
         _neon_for(W, H, s.neon_th, s.neon_speed).apply(fr, t)
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
-                           s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
+                           s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm,
+                           box_rgb=parse_rgb(s.sub_color, (0, 0, 0)))
         if ov:
             blend_overlay(fr, ov, (t / PREVIEW_SECS) if s.sub_sweep else None)
     cv2.imwrite(out_png, fr)
@@ -1734,6 +1760,10 @@ def add_style_args(p):
                    help="စာတန်း music sweep မထည့်ဘူး")
     g.add_argument("--sub-size", type=float, default=SUP, help="%% of width (3-12)")
     g.add_argument("--sub-pos", type=int, default=SUP, help="0=top 100=bottom")
+    g.add_argument("--sub-alpha", type=int, default=SUP,
+                   help="စာတန်း နောက်ခံ အမည်း (0=မမြင်ရ · 204=default · 255=အမည်းကြီး)")
+    g.add_argument("--sub-color", default=SUP,
+                   help="စာတန်း နောက်ခံ R,G,B (ဥပမာ 20,20,60 · default '0,0,0' အမည်း)")
     g.add_argument("--font", default=SUP, help="font file path")
     g.add_argument("--no-neon", dest="neon", action="store_false", default=SUP)
     g.add_argument("--neon-th", type=int, default=SUP)
@@ -1761,10 +1791,13 @@ def settings_for(proj, args):
     s.zoom = max(1.0, min(1.25, s.zoom))
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
+    s.sub_alpha = max(0, min(255, int(s.sub_alpha)))
     s.split_min = max(0.0, float(s.split_min))
     s.bgm_vol = max(0.0, min(1.0, float(s.bgm_vol)))
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
     s.loud_lufs = max(-24.0, min(-8.0, float(s.loud_lufs)))
+    # accept '#RRGGBB' or 'R,G,B' or 'R G B' as sub_color — normalise to 'R,G,B'
+    s.sub_color = ",".join(str(x) for x in parse_rgb(s.sub_color, (0, 0, 0)))
     if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -2069,8 +2102,8 @@ def launch_ui():
         threading.Thread(target=work, daemon=True).start()
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
-    def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
-                 pv_t, strict):
+    def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, sub_alpha,
+                 sub_color, neon, sweep, pv_t, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
@@ -2082,6 +2115,8 @@ def launch_ui():
             s.lang, s.height, s.zoom = code, int(height), float(zoom)
             s.crop, s.flip, s.sub, s.neon = bool(crop), bool(flip), bool(sub), bool(neon)
             s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
+            s.sub_alpha = max(0, min(255, int(sub_alpha)))
+            s.sub_color = ",".join(str(x) for x in parse_rgb(sub_color, (0, 0, 0)))
             s.neon_speed = Settings().neon_speed
             font = find_font(code, s.font) if s.sub else None
             for old in glob.glob(os.path.join(pdir, "preview_*.png")):
@@ -2102,8 +2137,8 @@ def launch_ui():
     def preview_auto(*a):
         return _preview(*a, False)
 
-    def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep,
-                   pv_t):
+    def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, sub_alpha,
+                   sub_color, neon, sweep, pv_t):
         st = FETCH.get(jid) if jid else None
         if st is None:
             return gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
@@ -2119,8 +2154,8 @@ def launch_ui():
             return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.Timer(active=False)
         pdir, proj = st["res"]
         mb = os.path.getsize(proj.video) / 1e6
-        img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
-                       sweep, pv_t, False)
+        img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, sub_alpha,
+                       sub_color, neon, sweep, pv_t, False)
         return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ",
                 img, gr.Timer(active=False))
 
@@ -2178,7 +2213,7 @@ def launch_ui():
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
               height, fps, preset, max_speed, crop, flip, zoom,
-              sub, sub_size, sub_pos, neon, sweep, split_on, split_min,
+              sub, sub_size, sub_pos, sub_alpha, sub_color, neon, sweep, split_on, split_min,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
@@ -2200,6 +2235,8 @@ def launch_ui():
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
             s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
+            s.sub_alpha = max(0, min(255, int(sub_alpha)))
+            s.sub_color = ",".join(str(x) for x in parse_rgb(sub_color, (0, 0, 0)))
             s.sub_sweep = bool(sweep)
             s.split = bool(split_on)
             s.split_min = max(0.0, float(split_min or 0))
@@ -2318,19 +2355,25 @@ def launch_ui():
                 flip = gr.Checkbox(True, label="Mirror")
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
+            with gr.Row():
+                sub_alpha = gr.Slider(0, 255, value=204, step=5,
+                                      label="စာတန်း နောက်ခံ အမည်း (0=မမြင်ရ · 204=default · 255=အမည်းကြီး)")
+                sub_color = gr.Textbox(value="0,0,0",
+                                       label="နောက်ခံ R,G,B (0,0,0=အမည်း · 20,20,60=အပြာရင့် · #RRGGBB လည်းရ)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
-        pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep, pv_t]
+        pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sub_alpha,
+                 sub_color, neon, sweep, pv_t]
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click, upload.upload):
             trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
         fetch_timer.tick(poll_fetch,
-                         [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon,
-                          sweep, pv_t],
+                         [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos,
+                          sub_alpha, sub_color, neon, sweep, pv_t],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, neon, flip, lang, pv_t):
+        for c in (sub_size, sub_pos, sub_alpha, sub_color, zoom, sub, sweep, neon, flip, lang, pv_t):
             c.change(preview_auto, pv_in, pv_img,
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
@@ -2381,7 +2424,8 @@ def launch_ui():
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
                          height, fps, preset, max_speed, crop, flip, zoom,
-                         sub, sub_size, sub_pos, neon, sweep, split_on, split_min],
+                         sub, sub_size, sub_pos, sub_alpha, sub_color, neon, sweep,
+                         split_on, split_min],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
