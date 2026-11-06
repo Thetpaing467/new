@@ -7,7 +7,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang en
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 
 import argparse
 import asyncio
@@ -243,24 +243,45 @@ _STORY_DE = (
     "say it. "
 )
 
+# ---- English Dramatic / Cinematic (the chosen C style) ------------------
 _STORY_EN = (
-    "ENGLISH STORYTELLER VOICE (very important): write like a real English speaker telling "
-    "a friend what happened in a series over coffee. It must NOT sound like a translation, "
-    "a news article, a Wikipedia summary, or a subtitle file. "
+    "ENGLISH DRAMATIC RECAP NARRATOR (very important): you are a cinematic drama-recap "
+    "narrator for a YouTube/TikTok recap channel. Your voice is tense, gripping and emotional — "
+    "like a movie trailer narrator telling the story to a viewer who cannot look away. It must "
+    "NOT sound like a news article, a Wikipedia summary, a translated textbook, or a flat "
+    "subtitle file. "
 
     "TENSE: tell the whole recap in the simple present tense, the way people retell a film: "
-    "'Xiao Li comes home and sees that the door is open.' Use past perfect only for things "
-    "that happened earlier ('She had promised him that years ago.'). Do not mix tenses. "
+    "'Xiao Li comes home and sees that the door is open.' Use past perfect only for things that "
+    "happened earlier ('She had promised him that years ago.'). Do not mix tenses. "
+
+    "SENTENCE RHYTHM — the heart of the dramatic style: mix VERY short punchy lines with "
+    "medium flowing ones. A short line of two or three words is allowed and powerful ('A scream.', "
+    "'Then everything changed.', 'But he did not explode.'). Never write three long sentences "
+    "in a row — break them up. Vary sentence openings: sometimes a subject, sometimes a time or "
+    "place ('That night...', 'In the hallway...', 'Out of nowhere...'), sometimes a "
+    "conjunction ('But...', 'And then...', 'Only then...'). Do not start more than two lines "
+    "in a row with the same word. Avoid long nested sentences — the TTS engine must never run "
+    "out of breath. "
 
     "REPORTED SPEECH, THE SPOKEN WAY: use a natural 'that' clause or plain reporting: "
     "'She says she's had enough.' or 'He tells her that he's leaving.' "
     "NEVER use stiff literary reported speech ('she stated that she would henceforth...'). "
 
     "REPORTING VERBS (very important): never the same reporting verb in two consecutive "
-    "lines, and 'says' at most once every four lines. Rotate: asks, answers, explains, "
-    "tells, snaps, shouts, whispers, warns, promises, denies, admits, laughs, threatens, "
-    "begs, mutters, fires back, presses. When the action already shows it, drop the "
-    "reporting verb and just state what the person does. "
+    "lines, and 'says' at most once every four lines. Rotate: asks, answers, snaps, shouts, "
+    "whispers, warns, promises, denies, admits, laughs, threatens, begs, mutters, fires back, "
+    "presses. When the action already shows it, drop the reporting verb and just state what the "
+    "person does. "
+
+    "EMOTIONAL LANGUAGE (the dramatic edge): name the emotion when the scene shows it "
+    "(furious, shattered, relieved, cold, heartbroken, stunned). Show how a person moves or "
+    "speaks (trembles, storms out, goes pale, slams the door, holds back tears, freezes, "
+    "screams). This is what makes the recap feel alive. "
+
+    "PLOT TWISTS — the hook: when the story turns, make it hit hard with a short, sharp "
+    "sentence ('Only then does he realize the truth.', 'In that moment, everything clicks.', "
+    "'But the truth is far worse.'). Do not overuse this — one strong hit per scene is enough. "
 
     "SPOKEN ENGLISH FEEL: use everyday words and contractions (it's, he's, they're, "
     "gonna, wanna, kinda — but not in every line). Prefer lively verbs to noun phrases: "
@@ -268,13 +289,9 @@ _STORY_EN = (
     "decision to leave' but 'She decides to leave.' No business English, no "
     "'utilize', 'commence', 'prior to', 'in order to' in every line. "
 
-    "SENTENCE VARIETY: mix short lines ('The door is open.') with medium ones. Do not "
-    "start every sentence with the character's name; sometimes start with a time or place "
-    "('The next morning ...', 'A moment later ...', 'Out in the hallway ...'). Do not start "
-    "more than two lines in a row with the same word. Avoid long nested sentences. "
-
-    "CONNECTORS: vary them — and then, but, suddenly, a moment later, meanwhile, still, "
-    "yet, of all people, hardly is she inside when, in the meantime, all at once, only. "
+    "CONNECTORS: vary them — but, and then, suddenly, a moment later, meanwhile, "
+    "out of nowhere, only then, still, yet, of all people, hardly is she inside when, "
+    "in the meantime, all at once. "
 
     "IDIOMS: never translate Chinese or other idioms literally. Replace them with an "
     "English expression that people really say, or just say plainly what is meant. "
@@ -296,14 +313,13 @@ _STORY_EN = (
     "million'. No abbreviations: 'for example' instead of 'e.g.', 'and so on' instead "
     "of 'etc.'. "
 
-    "EMOTION: show feelings through word choice and rhythm: 'She yells at him', 'he "
-    "whispers with tears in his eyes', 'she smiles coldly', 'he can't believe his ears'. "
-    "A question a character asks should come across as a real question: 'She asks him "
-    "how he even knows that.' "
+    "NO QUOTES, NO EMOJI, NO BRACKETS: never use quotation marks, emoji, brackets, "
+    "asterisks or stage directions. The narration is spoken, not acted. Report the dialogue "
+    "in third person and let the narration carry the emotion through word choice. "
 
-    "FINAL SELF-CHECK for every line: imagine reading it aloud to a friend. If it sounds "
-    "like a translation, a textbook or a robot, rewrite it the way a native English "
-    "speaker would really say it. "
+    "FINAL SELF-CHECK for every line: imagine reading it aloud to a friend in a low, "
+    "tense voice. If it sounds like a translation, a textbook or a robot, rewrite it the way "
+    "a native English narrator of a hit drama recap channel would really say it. "
 )
 
 
@@ -401,23 +417,24 @@ LANG_CONF = {
         ],
         "sentence_end": r"(?<=[.!?])\s+",
         "prompt": (
-            "You are a native English storyteller who retells TV dramas to friends in a "
-            "recap video. Rewrite every numbered line below as natural, relaxed, spoken "
-            "English — the way a real person would tell it, not a translation. "
+            "You are a dramatic English drama-recap narrator for a YouTube/TikTok recap "
+            "channel. Your voice is tense, gripping and cinematic — you tell the story to a "
+            "viewer who cannot look away. Rewrite every numbered line below as natural, "
+            "spoken, dramatic English — not a translation, not a news article. "
             + _tail(
                 script="use ONLY English (Latin script), no Chinese letters.",
-                accent=("Speak relaxed, everyday English as in a chat with a friend: "
-                        "contractions like 'it's', 'he's', 'they're' are fine, and put a "
+                accent=("Speak tense, gripping, everyday English — like a movie trailer "
+                        "narrator telling the story to a friend. Use contractions and put a "
                         "comma at every natural breath point."),
                 story=_STORY_EN)
         ),
         "chunk_note": (
             _RECAP_NOTE +
             "Keep character names, their spelling and role words exactly the same as in the "
-            "other parts. Keep the same tense (simple present) and the same relaxed spoken "
-            "English tone as in all other parts. Vary reporting verbs and sentence openings; "
-            "'says' at most once every four lines. Use he/she/they naturally, but use the "
-            "name when two characters of the same gender are in the scene."
+            "other parts. Keep the same tense (simple present), the same DRAMATIC cinematic "
+            "tone, and the same mix of short punchy lines with flowing ones. Vary reporting "
+            "verbs and sentence openings; 'says' at most once every four lines. Never use "
+            "quotation marks, emoji, brackets or stage directions."
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
         "clean": r"[^A-Za-z0-9\s.,!?\"'%\-]",
@@ -1562,7 +1579,6 @@ _AFMT = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
 
 def mix_audio(voice, wd, s, total):
-    """Voice ကို loudnorm + gain ချိန်ပြီး <wd>/mix.wav ထုတ်။ (BGM မပါ)"""
     out = os.path.join(wd, "mix.wav")
     gain = f"loudnorm=I={s.loud_lufs:g}:TP=-1.5:LRA=11,volume={s.voice_db:g}dB"
     fc = f"[0:a]{_AFMT},{gain},alimiter=limit=0.97[o]"
