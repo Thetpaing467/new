@@ -7,7 +7,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 import argparse
 import asyncio
@@ -377,7 +377,7 @@ class Settings:
     sub: bool = True
     sub_size: float = 7.0         # % of width
     sub_pos: int = 90             # 0 = top, 100 = bottom
-    sub_alpha: int = 204
+    sub_alpha: int = 140
     sub_sweep: bool = True        # music-style light sweep across the subtitle
     font: str = ""                # explicit font path
     # Neon
@@ -636,41 +636,64 @@ def split_for_sub(text, mc=36, lang="my"):
 # ======================================================================
 # overlay: subtitle (Pillow), music sweep, neon border, zoom/flip
 # ======================================================================
-SWEEP_TRAIL = np.array([255, 235, 60], np.float32)
-SWEEP_BAND = np.array([255, 255, 235], np.float32)
+SWEEP_TRAIL = np.array([185, 232, 255], np.float32)   # BGR warm light (gold ပေါ်မှာ မြင်ရအောင်)
+SWEEP_BAND = np.array([235, 255, 255], np.float32)
+
+GLASS_TINT = np.array([86, 104, 124], np.float32)     # BGR  (RGB 124,104,86 = warm brown-grey glass)
+GOLD = (255, 214, 40)                                  # RGB  စာအရောင် (ရွှေဝါ)
 
 
-def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 255),
+def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
                   layout="raqm", is_mm=True):
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    ink_img = Image.new("L", (W, H), 0)
-    di = ImageDraw.Draw(ink_img)
-
+    """Frosted-glass subtitle: the box is NOT a flat black fill any more. The real video behind
+    it is blurred (done per frame in blend_overlay) and tinted warm brown-grey, with a thin
+    light edge, then gold text with a dark outline on top.
+    alpha (0-255) = glass tint strength (default 140)."""
+    mx = int(W * 0.04)                       # side margin -> floating box like the reference
+    bw = W - 2 * mx
     pad_x, pad_y = int(fs * 0.6), int(fs * 0.5)
     lh_box = int(fs * 1.4)
-    box_h = min(SUB_LINES * lh_box + 2 * pad_y, H)
-    max_y = max(0, H - box_h)
+    bh = min(SUB_LINES * lh_box + 2 * pad_y, H)
+    max_y = max(0, H - bh)
     box_y = max(0, min(int(pos_y / 100 * max_y), max_y))
 
     cur_fs = fs
     font = get_font(font_path, cur_fs, layout)
-    lines = wrap_text(text, font, W - 2 * pad_x, is_mm)
+    lines = wrap_text(text, font, bw - 2 * pad_x, is_mm)
     while len(lines) > SUB_LINES and cur_fs > 12:
         cur_fs = max(12, int(cur_fs * 0.92))
         font = get_font(font_path, cur_fs, layout)
-        lines = wrap_text(text, font, W - 2 * pad_x, is_mm)
+        lines = wrap_text(text, font, bw - 2 * pad_x, is_mm)
     if not lines:
         return None
 
-    d.rounded_rectangle([0, box_y, W, box_y + box_h], radius=int(fs * 0.66),
-                        fill=(0, 0, 0, alpha))
+    # ---- glass shape (anti-aliased rounded rectangle) + thin light edge
+    radius = max(4, int(fs * 0.30))
+    m = Image.new("L", (bw, bh), 0)
+    ImageDraw.Draw(m).rounded_rectangle([0, 0, bw - 1, bh - 1], radius=radius, fill=255)
+    mask = cv2.GaussianBlur(np.array(m).astype(np.float32) / 255.0, (0, 0), 0.8)
+
+    inner = Image.new("L", (bw, bh), 0)
+    ImageDraw.Draw(inner).rounded_rectangle([2, 2, bw - 3, bh - 3],
+                                            radius=max(2, radius - 2), fill=255)
+    inner = cv2.GaussianBlur(np.array(inner).astype(np.float32) / 255.0, (0, 0), 0.8)
+    grad = np.linspace(1.0, 0.25, bh, dtype=np.float32)[:, None]     # top edge brighter
+    edge = np.clip(mask - inner, 0.0, 1.0) * grad * 0.40
+    sheen = (np.linspace(16.0, 0.0, bh, dtype=np.float32))[:, None, None]  # soft glass reflection
+
+    # ---- text (gold fill + dark outline), drawn in box-local coordinates
+    img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    ink_img = Image.new("L", (bw, bh), 0)
+    di = ImageDraw.Draw(ink_img)
     ink = (int(color[0]), int(color[1]), int(color[2]), 255)
-    sw = max(1, round(cur_fs / 15))
+    sw = max(2, round(cur_fs / 11))
     lh = int(cur_fs * 1.4)
-    ty = box_y + (box_h - len(lines) * lh) // 2
+    ty = (bh - len(lines) * lh) // 2
     for ln in lines:
-        lx = (W - font.getlength(ln)) / 2
+        lx = (bw - font.getlength(ln)) / 2
+        d.text((lx + 1, ty + 2), ln, font=font, fill=(0, 0, 0, 170),          # soft drop shadow
+               stroke_width=sw, stroke_fill=(0, 0, 0, 170))
         d.text((lx, ty), ln, font=font, fill=(0, 0, 0, 255),
                stroke_width=sw, stroke_fill=(0, 0, 0, 255))
         d.text((lx, ty), ln, font=font, fill=ink)
@@ -678,27 +701,42 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
         ty += lh
 
     arr = np.array(img)
-    rows = np.where(arr[:, :, 3].any(axis=1))[0]
-    if len(rows) == 0:
-        return None
-    y0, y1 = int(rows[0]), int(rows[-1]) + 1
-    crop = arr[y0:y1]
-    a = crop[:, :, 3:4].astype(np.float32) / 255.0
-    bgr = crop[:, :, [2, 1, 0]].astype(np.float32)
-    tm = (np.array(ink_img)[y0:y1].astype(np.float32) / 255.0)[:, :, None]
-    return {"y0": y0, "y1": y1, "inv": 1.0 - a, "pre": bgr * a,
-            "tm": tm, "xs": np.arange(W, dtype=np.float32)[None, :, None]}
+    a = arr[:, :, 3:4].astype(np.float32) / 255.0
+    bgr = arr[:, :, [2, 1, 0]].astype(np.float32)
+    tm = (np.array(ink_img).astype(np.float32) / 255.0)[:, :, None]
+
+    return {"y0": box_y, "y1": box_y + bh, "x0": mx, "x1": mx + bw,
+            "mask": mask[:, :, None], "edge": edge[:, :, None], "sheen": sheen,
+            "tint_a": max(0.0, min(float(alpha) / 255.0, 1.0)),
+            "sigma": max(3.0, fs * 0.30),
+            "inv": 1.0 - a, "pre": bgr * a, "tm": tm,
+            "xs": np.arange(bw, dtype=np.float32)[None, :, None]}
 
 
 def blend_overlay(fr, ov, p=None):
-    reg = fr[ov["y0"]:ov["y1"]].astype(np.float32) * ov["inv"] + ov["pre"]
+    y0, y1, x0, x1 = ov["y0"], ov["y1"], ov["x0"], ov["x1"]
+    base = fr[y0:y1, x0:x1]
+
+    # 1) frosted glass: blur what is really behind the box, then tint it
+    blur = cv2.GaussianBlur(base, (0, 0), ov["sigma"]).astype(np.float32)
+    ta = ov["tint_a"]
+    glass = blur * (1.0 - ta) + GLASS_TINT * ta + ov["sheen"]
+    reg = base.astype(np.float32) * (1.0 - ov["mask"]) + glass * ov["mask"]
+
+    # 2) thin light glass edge
+    reg = reg * (1.0 - ov["edge"]) + 255.0 * ov["edge"]
+
+    # 3) text
+    reg = reg * ov["inv"] + ov["pre"]
+
+    # 4) music-style light sweep over the letters
     if p is not None:
         W = reg.shape[1]
         p = max(0.0, min(float(p), 1.0))
         c = (-0.12 + 1.24 * p) * W
-        bw = 0.07 * W
+        bw_ = 0.07 * W
         x = ov["xs"]
-        band = np.exp(-(((x - c) / bw) ** 2))
+        band = np.exp(-(((x - c) / bw_) ** 2))
         trail = (x < c).astype(np.float32) * 0.55
         tm = ov["tm"]
         k_trail = np.clip(trail, 0.0, 1.0) * tm
@@ -706,7 +744,8 @@ def blend_overlay(fr, ov, p=None):
         k_band = np.clip(band * 0.95, 0.0, 1.0) * tm
         reg = reg * (1.0 - k_band) + SWEEP_BAND * k_band
         reg += band * (1.0 - ov["inv"]) * 22.0
-    fr[ov["y0"]:ov["y1"]] = np.clip(reg, 0, 255).astype(np.uint8)
+
+    fr[y0:y1, x0:x1] = np.clip(reg, 0, 255).astype(np.uint8)
 
 
 class Neon:
@@ -1151,7 +1190,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     nfr = max(1, int(round(total * fps_out)))
     fs = max(16, int(W * s.sub_size / 100))
     neon = Neon(W, H, s.neon_th, s.neon_speed) if s.neon else None
-    style = {"alpha": int(s.sub_alpha), "color": (255, 255, 255), "layout": "raqm"}
+    style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
 
     q = queue.Queue(maxsize=32)
     stop = threading.Event()
