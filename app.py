@@ -9,7 +9,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --mirror-every 0
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 import argparse
 import asyncio
@@ -144,43 +144,56 @@ _STORY_CORE = (
     "the same person and use one spelling throughout. "
 )
 
-# ---- Burmese specific (calm third-person movie/drama recap, mostly ပါတယ်။) ----
+# ---- Burmese specific (calm third-person movie/drama recap, spoken not literary) ----
 _STORY_MY = (
-    "RECAP NARRATOR STYLE (very important): you are a calm Burmese movie/drama recap narrator "
-    "retelling the story to viewers in third person, present tense, using the character names. "
-    "Do NOT use ကျွန်တော်, do NOT use ဗျ, do NOT add your own opinions, jokes or comparisons. "
+    "RECAP NARRATOR STYLE (very important): calm Burmese movie/drama recap narrator, "
+    "third person, present tense, using character names. "
+    "Do NOT use ကျွန်တော် or ဗျ. No opinions, jokes or comparisons. "
     "Just tell what happens, clearly and smoothly, in the order it happens. "
 
-    "ENDINGS: most lines end with ပါတယ်။ (about three lines out of four). Use plain တယ်။ or "
-    "ပါဘူး။ only now and then for variety. Never end with the literary ၏ / သည်။. "
+    "SPOKEN BURMESE (most important): write the way a Burmese person actually talks, "
+    "NOT like a book. Use spoken forms: တယ် / ပါတယ် / ဘူး / မယ် / တော့ / လိုက်တယ် / "
+    "သွားတယ် / နေတယ်. "
+    "NEVER use literary forms: သည် / ၏ / သော် / ဖြစ်ပေါ်သည် / ထို့ကြောင့် / သို့သော်လည်း / "
+    "ဖြစ်သည် / ရှိသည် / ပြုသည်. "
 
-    "CONNECTORS: link the events with natural spoken connectors and vary them: "
-    "အဲ့ဒါနဲ့၊ ဒါပေမဲ့၊ အဲဒီအချိန်မှာပဲ၊ ပြီးတော့၊ အဲ့တော့၊ ဒါကြောင့်၊ နောက်ပိုင်းမှာတော့၊ "
-    "တစ်ဖက်မှာတော့၊ ရုတ်တရက်၊ ဒီအချိန်မှာ. Never use the same connector in two lines in a row. "
+    "REWRITE THESE (very important): "
+    "'သူမသည် ကြားသိရသောအခါ' → 'သူမ ကြားတော့'; "
+    "'ထို့ကြောင့် ဆုံးဖြတ်လိုက်သည်' → 'အဲ့တော့ ဆုံးဖြတ်လိုက်တယ်'; "
+    "'ဖြစ်ပေါ်လာခဲ့သည်' → 'ဖြစ်လာတယ်'; "
+    "'သို့သော်လည်း သူ မသိခဲ့ပါ' → 'ဒါပေမဲ့ သူ မသိဘူး'. "
 
-    "SPEECH: report what characters say in the narrator's voice, with a variety of verbs: "
-    "လို့ ပြောပါတယ်၊ လို့ မေးပါတယ်၊ လို့ ဖြေပါတယ်၊ လို့ ရှင်းပြပါတယ်၊ လို့ သတိပေးပါတယ်၊ "
-    "လို့ အော်ပါတယ်၊ လို့ ငြင်းပါတယ်. No quotation marks. "
+    "ENDINGS: mix them naturally — ပါတယ်။ / တယ်။ / ဘူး။ / မယ်။. "
+    "Do NOT use ပါတယ်။ on every line. Aim for 2 out of 4 lines with ပါတယ်။, "
+    "the rest with တယ်။ or ဘူး။. Never end with the literary ၏ / သည်။. "
 
-    "NAMES: write every character name in Burmese script (transliterate it), the same way "
-    "every time, and use the name as the subject (ဝါလ်တာက ...၊ လန်စ်က ...). Never leave "
-    "English or Chinese letters in the output. When a name is unknown use a role word "
-    "(အမေ၊ သူငယ်ချင်း၊ သူဌေး၊ ကောင်မလေး၊ ဦးကြီး) or leave the subject out. Never write "
-    "လူတစ်ယောက်. Use သူ only when it is perfectly clear who is meant. "
+    "CONNECTORS: အဲ့ဒါနဲ့၊ ဒါပေမဲ့၊ အဲဒီအချိန်မှာပဲ၊ ပြီးတော့၊ အဲ့တော့၊ ဒါကြောင့်၊ "
+    "နောက်ပိုင်းမှာတော့၊ တစ်ဖက်မှာတော့၊ ရုတ်တရက်. "
+    "Never use the same connector in two lines in a row. "
 
-    "TRANSLATE MEANING: do not translate word by word. Convert idioms and slang into natural "
-    "spoken Burmese. Mention the emotion when the scene shows it (စိတ်တိုတိုနဲ့၊ ဝမ်းသာသွားပြီး၊ "
-    "အံ့ဩသွားပြီး). "
+    "SPEECH: report what characters say in the narrator's voice: လို့ ပြောတယ် / မေးတယ် / "
+    "ဖြေတယ် / ရှင်းပြတယ် / သတိပေးတယ် / အော်တယ် / ငြင်းတယ်. No quotation marks. "
+    "Vary the verb — never the same one twice in a row. "
 
-    "SENTENCES: keep them short to medium, one idea each, with a comma-type ၊ at breath points "
-    "and ။ at the end. Write clean Burmese with normal spacing between phrases. "
+    "NAMES: write every character name in Burmese script (transliterate it), the same "
+    "spelling every time. Use the name as subject (ဝါလ်တာက ...). "
+    "Never leave English or Chinese letters. "
+    "Unknown name → role word (အမေ၊ သူငယ်ချင်း၊ သူဌေး၊ ကောင်မလေး၊ ဦးကြီး). "
+    "Never write လူတစ်ယောက်. Use သူ only when it is perfectly clear who is meant. "
+
+    "TRANSLATE MEANING: do not translate word by word. Convert idioms and slang into "
+    "natural spoken Burmese. Show emotion through word choice (စိတ်တိုတိုနဲ့၊ "
+    "ဝမ်းသာသွားပြီး၊ အံ့ဩသွားပြီး). "
+
+    "SENTENCES: keep them short to medium, one idea each, with ၊ at breath points and ။ "
+    "at the end. Clean Burmese with normal spacing. "
 
     "STYLE EXAMPLES (copy the TONE only, never the content): "
-    "'ဝိုင်းလ်ဒါဆိုတဲ့ ကောင်လေးက ငယ်ငယ်ထဲကတည်းက ဉာဏ်ကောင်းတဲ့ ကလေးတစ်ယောက် ဖြစ်ပါတယ်။' "
-    "'ဒါပေမဲ့ တစ်ယောက်တည်းပဲ လှုပ်ရှားတတ်တဲ့ လန်စ်က အဖွဲ့တွေကို မခေါ်ဘဲ တစ်ယောက်တည်း ဝင်သွားပါတယ်။' "
-    "'စိတ်တိုသွားတဲ့ လန်စ်က ဖြေဆေးပေးဖို့ တောင်းပေမယ့် ဖြေဆေးက မရှိသေးပါဘူး။' "
-    "'အဲဒီအချိန်မှာပဲ မာစီနဲ့ သူ့အဖွဲ့တွေ ရောက်လာတာကြောင့် သူတို့နှစ်ယောက် ထွက်ပြေးကြပါတယ်။' "
-    "'ကမ္ဘာပေါ်မှာ လူဆိုး လူကောင်းဆိုတာ မရှိဘူး၊ လူက လူပဲလို့ ဝါလ်တာက ပြောပါတယ်။' "
+    "'သူမ အိမ်ပြန်ရောက်တော့ တံခါးက ဖွင့်ထားတယ်။ သူမ တော်တော် လန့်သွားတယ်။' "
+    "'အဲဒီအချိန်မှာပဲ ဖုန်းမြည်လာတယ်။ သူမ ဖုန်းကို ကောက်ကိုင်လိုက်တယ်။' "
+    "'သူ့အမေက ဒီအကြောင်း သိတာနဲ့ ချက်ချင်း ဒေါသထွက်သွားတယ်။' "
+    "'ဒါပေမဲ့ သူ ဘာမှ မပြောဘူး။ ငြိမ်ငြိမ်ပဲ ထိုင်နေတယ်။' "
+    "'ကမ္ဘာပေါ်မှာ လူဆိုး လူကောင်းဆိုတာ မရှိဘူး၊ လူက လူပဲလို့ ဝါလ်တာက ပြောတယ်။' "
 
     "NUMBERS: write numbers as Burmese words (၇၀ → ခုနစ်ဆယ်). "
 )
