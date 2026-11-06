@@ -4,11 +4,10 @@ Languages: Burmese (my) / German (de)   ·   Sources: YouTube / TikTok (yt-dlp),
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --lang de --no-split
-       python recap.py run <video|url> -d work/ep1 --voice my-MM-ThihaNeural --pitch -20
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.13.0"
+__version__ = "1.12.0"
 
 import argparse
 import asyncio
@@ -269,20 +268,10 @@ LANG_CONF = {
         "name": "Burmese",
         "label": "မြန်မာ",
         "sample": "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။",
-        "voice_sample": "ဒီနေ့ ဇာတ်လမ်းလေးကို စတင်ပါမယ်။ ဝါလ်တာက သူ့အမေကို အိမ်ပြန်လာဖို့ ပြောပါတယ်။",
         "rate": 45,
         "edge_voices": [
             ("my-MM-ThihaNeural", "Thiha (male)"),
             ("my-MM-NilarNeural", "Nilar (female)"),
-        ],
-        # (label, voice, pitch Hz) — one click sets voice + pitch
-        "presets": [
-            ("Thiha · ပုံမှန်", "my-MM-ThihaNeural", 0),
-            ("Thiha · လူကြီး (နိမ့်)", "my-MM-ThihaNeural", -20),
-            ("Thiha · လူငယ် (မြင့်)", "my-MM-ThihaNeural", 12),
-            ("Nilar · ပုံမှန်", "my-MM-NilarNeural", 0),
-            ("Nilar · နူးညံ့ (နိမ့်)", "my-MM-NilarNeural", -12),
-            ("Nilar · လူငယ် (မြင့်)", "my-MM-NilarNeural", 15),
         ],
         "sentence_end": r"(?<=။)",
         "prompt": (
@@ -311,24 +300,12 @@ LANG_CONF = {
         "name": "German",
         "label": "ဂျာမနီ",
         "sample": "Dies ist ein Beispiel-Untertitel.",
-        "voice_sample": ("Heute erzähle ich euch eine spannende Geschichte. "
-                         "Walter bittet seine Mutter, nach Hause zu kommen."),
         "rate": 10,
         "edge_voices": [
             ("de-DE-KatjaNeural", "Katja (female)"),
             ("de-DE-ConradNeural", "Conrad (male)"),
             ("de-DE-AmalaNeural", "Amala (female)"),
             ("de-DE-BerndNeural", "Bernd (male)"),
-            ("de-DE-SeraphinaMultilingualNeural", "Seraphina (female)"),
-            ("de-DE-FlorianMultilingualNeural", "Florian (male)"),
-        ],
-        "presets": [
-            ("Katja · ပုံမှန်", "de-DE-KatjaNeural", 0),
-            ("Seraphina · ပုံမှန်", "de-DE-SeraphinaMultilingualNeural", 0),
-            ("Conrad · ပုံမှန်", "de-DE-ConradNeural", 0),
-            ("Conrad · နက်ရှိုင်း", "de-DE-ConradNeural", -15),
-            ("Florian · ပုံမှန်", "de-DE-FlorianMultilingualNeural", 0),
-            ("Katja · လူငယ်", "de-DE-KatjaNeural", 10),
         ],
         "sentence_end": r"(?<=[.!?])\s+",
         "prompt": (
@@ -378,7 +355,6 @@ class Settings:
     lang: str = "my"
     voice: str = ""               # empty -> first voice of language
     rate: Optional[int] = None    # Edge speed % · None -> language default (my 45 / de 10)
-    pitch: int = 0                # Edge pitch Hz (-50..+50)
     tts_workers: int = 8
     # Audio mix
     loud_lufs: float = -14.0      # voice loudness target (ပိုကျယ်ချင်ရင် -12)
@@ -427,9 +403,6 @@ class Settings:
 
     def rate_str(self):
         return f"{self.resolved_rate():+d}%"
-
-    def pitch_str(self):
-        return f"{int(self.pitch):+d}Hz"
 
 
 # ======================================================================
@@ -1105,12 +1078,12 @@ def check_part(text, lo, hi):
 # ======================================================================
 # tts (Edge only)
 # ======================================================================
-def tts_edge(text, voice, rate, mp3, proxy=None, pitch="+0Hz"):
+def tts_edge(text, voice, rate, mp3, proxy=None):
     import edge_tts
 
     async def run():
         kw = {"proxy": proxy} if proxy else {}
-        await edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, **kw).save(mp3)
+        await edge_tts.Communicate(text, voice, rate=rate, **kw).save(mp3)
 
     asyncio.run(run())
 
@@ -1543,7 +1516,7 @@ def _synthesize(proj, my_list, s, progress, proxy):
     wd = proj.path
     n = len(my_list)
     voice = s.resolved_voice()
-    sig_base = f"edge|{voice}|{s.rate_str()}|{s.pitch_str()}|noref"
+    sig_base = f"edge|{voice}|{s.rate_str()}|noref"
 
     def do_line(i):
         wav = os.path.join(wd, f"a{i:04d}.wav")
@@ -1559,7 +1532,7 @@ def _synthesize(proj, my_list, s, progress, proxy):
         raw_audio = os.path.join(wd, f"a{i:04d}_raw.mp3")
         for attempt in range(4):
             try:
-                tts_edge(my_list[i], voice, s.rate_str(), raw_audio, proxy, s.pitch_str())
+                tts_edge(my_list[i], voice, s.rate_str(), raw_audio, proxy)
                 break
             except Exception as ex:
                 if attempt == 3:
@@ -1732,8 +1705,6 @@ def add_style_args(p):
     g.add_argument("--voice", default=SUP, help="Edge voice name (e.g. my-MM-NilarNeural)")
     g.add_argument("--rate", type=int, default=SUP,
                    help="Edge speed %% (-50..100) · default: my 45 / de 10")
-    g.add_argument("--pitch", type=int, default=SUP,
-                   help="Edge pitch Hz (-50..50) · အသံနိမ့်/မြင့် (default 0)")
     g.add_argument("--workers", dest="tts_workers", type=int, default=SUP, help="parallel TTS jobs")
     g = p.add_argument_group("audio mix")
     g.add_argument("--loud", dest="loud_lufs", type=float, default=SUP,
@@ -1786,7 +1757,6 @@ def settings_for(proj, args):
             setattr(s, k, v)
     if s.rate is not None:
         s.rate = max(-50, min(100, int(s.rate)))
-    s.pitch = max(-50, min(50, int(s.pitch)))
     s.max_speed = max(1.0, min(2.0, s.max_speed))
     s.zoom = max(1.0, min(1.25, s.zoom))
     s.sub_size = max(3.0, min(12.0, s.sub_size))
@@ -2011,9 +1981,6 @@ def launch_ui():
     def voices_for(code):
         return [v for v, _ in LANG_CONF[code]["edge_voices"]]
 
-    def preset_names(code):
-        return [p[0] for p in LANG_CONF[code]["presets"]]
-
     def _path(f):
         if not f:
             return ""
@@ -2208,7 +2175,7 @@ def launch_ui():
                 chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
 
     # ---------------- step 2 (tts + render + split)
-    def step2(pdir, translated, parts, lang_name, voice, rate, pitch, workers,
+    def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
               height, fps, preset, max_speed, crop, flip, zoom,
               sub, sub_size, sub_pos, neon, sweep, split_on, split_min,
@@ -2228,7 +2195,6 @@ def launch_ui():
             s.lang = code
             s.voice = voice if voice in voices_for(code) else ""
             s.rate, s.tts_workers = int(rate), int(workers)
-            s.pitch = max(-50, min(50, int(pitch)))
             s.bgm, s.bgm_vol = _path(bgm_file), max(0.0, min(1.0, float(bgm_vol)))
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
@@ -2293,39 +2259,10 @@ def launch_ui():
             return parts, f"✅ {hi - lo}/{hi - lo}"
         return f
 
-    # ---------------- voice: language change / presets / audition
     def on_lang_change(l):
         code = LANGS[l]
         v = voices_for(code)
-        pn = preset_names(code)
-        return (gr.update(choices=v, value=v[0]),
-                gr.update(value=LANG_CONF[code]["rate"]),
-                gr.update(choices=pn, value=pn[0]),
-                gr.update(value=LANG_CONF[code]["presets"][0][2]),
-                gr.update(value=LANG_CONF[code]["voice_sample"]))
-
-    def on_preset(l, name):
-        for n, v, p in LANG_CONF[LANGS[l]]["presets"]:
-            if n == name:
-                return gr.update(value=v), gr.update(value=p)
-        return gr.skip(), gr.skip()
-
-    def voice_preview(l, voice, rate, pitch, text):
-        code = LANGS[l]
-        v = voice if voice in voices_for(code) else voices_for(code)[0]
-        text = clean_text(text or "", code) or LANG_CONF[code]["voice_sample"]
-        for old in glob.glob(os.path.join(BASE, "vp_*.mp3")):
-            try:
-                os.remove(old)
-            except OSError:
-                pass
-        out = os.path.join(BASE, f"vp_{int(time.time() * 1000)}.mp3")
-        try:
-            tts_edge(text, v, f"{int(rate):+d}%", out,
-                     os.environ.get("EDGE_TTS_PROXY") or None, f"{int(pitch):+d}Hz")
-        except Exception as ex:
-            raise gr.Error(f"အသံ စမ်းလို့ မရပါ: {str(ex)[:300]}")
-        return out
+        return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
 
     # ---------------- layout
     with gr.Blocks(**blocks_kw) as demo:
@@ -2335,7 +2272,7 @@ def launch_ui():
 
         height = gr.State(720)
         fps = gr.State(24)
-        preset_video = gr.State("ultrafast")
+        preset = gr.State("ultrafast")
         max_speed = gr.State(1.25)
         crop = gr.State(True)
         model = gr.State("base")
@@ -2345,23 +2282,12 @@ def launch_ui():
 
         with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
             lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
-            voice_preset = gr.Dropdown(preset_names("my"), value=preset_names("my")[0],
-                                       label="🎭 အသံ preset (ရွေးရင် voice + pitch အလိုအလျောက် ချိန်မယ်)")
             voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="Edge voice")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="Edge speed % (ဘာသာစကားပြောင်းရင် အလိုအလျောက် ချိန်မယ်)")
-                pitch = gr.Slider(-50, 50, value=0, step=1,
-                                  label="Pitch (Hz) · အသံ နိမ့်/မြင့် (±25 အတွင်း အကောင်းဆုံး)")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
-            vp_text = gr.Textbox(value=LANG_CONF["my"]["voice_sample"], lines=2,
-                                 label="🎧 စမ်းနားထောင်မယ့် စာသား (ပြင်လို့ရတယ်)")
-            b_vp = gr.Button("🎧 အသံ စမ်းနားထောင်")
-            vp_audio = gr.Audio(label="နမူနာအသံ", type="filepath", autoplay=True)
-
-            lang.change(on_lang_change, lang, [voice, rate, voice_preset, pitch, vp_text])
-            voice_preset.change(on_preset, [lang, voice_preset], [voice, pitch])
-            b_vp.click(voice_preview, [lang, voice, rate, pitch, vp_text], vp_audio)
+            lang.change(on_lang_change, lang, [voice, rate])
 
         with gr.Accordion("🎵 Background music + Voice အသံ", open=False):
             bgm_file = gr.File(label="🎵 Background music (optional · mp3/wav/m4a/ogg)",
@@ -2395,12 +2321,6 @@ def launch_ui():
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
         pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep, pv_t]
-        fetch_job = gr.State("")
-        fetch_timer = gr.Timer(1.0, active=False)
-        for trig in (url.submit, b_fetch.click, upload.upload):
-            trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
-        fetch_timer.tick(poll_fetch,
-                         [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, neon, sweep, pv_t]
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click, upload.upload):
@@ -2458,9 +2378,9 @@ def launch_ui():
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
-        b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, pitch, workers,
+        b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
-                         height, fps, preset_video, max_speed, crop, flip, zoom,
+                         height, fps, preset, max_speed, crop, flip, zoom,
                          sub, sub_size, sub_pos, neon, sweep, split_on, split_min],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
