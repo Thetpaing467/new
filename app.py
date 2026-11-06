@@ -5,11 +5,9 @@ Languages: Burmese (my) / German (de)   ·   Sources: YouTube / TikTok (yt-dlp),
 Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --lang de --no-split
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
-       python recap.py run <video|url> -d work/ep1 --mirror-every 5
-       python recap.py run <video|url> -d work/ep1 --mirror-every 0
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.14.0"
+__version__ = "1.12.0"
 
 import argparse
 import asyncio
@@ -144,56 +142,43 @@ _STORY_CORE = (
     "the same person and use one spelling throughout. "
 )
 
-# ---- Burmese specific (calm third-person movie/drama recap, spoken not literary) ----
+# ---- Burmese specific (calm third-person movie/drama recap, mostly ပါတယ်။) ----
 _STORY_MY = (
-    "RECAP NARRATOR STYLE (very important): calm Burmese movie/drama recap narrator, "
-    "third person, present tense, using character names. "
-    "Do NOT use ကျွန်တော် or ဗျ. No opinions, jokes or comparisons. "
+    "RECAP NARRATOR STYLE (very important): you are a calm Burmese movie/drama recap narrator "
+    "retelling the story to viewers in third person, present tense, using the character names. "
+    "Do NOT use ကျွန်တော်, do NOT use ဗျ, do NOT add your own opinions, jokes or comparisons. "
     "Just tell what happens, clearly and smoothly, in the order it happens. "
 
-    "SPOKEN BURMESE (most important): write the way a Burmese person actually talks, "
-    "NOT like a book. Use spoken forms: တယ် / ပါတယ် / ဘူး / မယ် / တော့ / လိုက်တယ် / "
-    "သွားတယ် / နေတယ်. "
-    "NEVER use literary forms: သည် / ၏ / သော် / ဖြစ်ပေါ်သည် / ထို့ကြောင့် / သို့သော်လည်း / "
-    "ဖြစ်သည် / ရှိသည် / ပြုသည်. "
+    "ENDINGS: most lines end with ပါတယ်။ (about three lines out of four). Use plain တယ်။ or "
+    "ပါဘူး။ only now and then for variety. Never end with the literary ၏ / သည်။. "
 
-    "REWRITE THESE (very important): "
-    "'သူမသည် ကြားသိရသောအခါ' → 'သူမ ကြားတော့'; "
-    "'ထို့ကြောင့် ဆုံးဖြတ်လိုက်သည်' → 'အဲ့တော့ ဆုံးဖြတ်လိုက်တယ်'; "
-    "'ဖြစ်ပေါ်လာခဲ့သည်' → 'ဖြစ်လာတယ်'; "
-    "'သို့သော်လည်း သူ မသိခဲ့ပါ' → 'ဒါပေမဲ့ သူ မသိဘူး'. "
+    "CONNECTORS: link the events with natural spoken connectors and vary them: "
+    "အဲ့ဒါနဲ့၊ ဒါပေမဲ့၊ အဲဒီအချိန်မှာပဲ၊ ပြီးတော့၊ အဲ့တော့၊ ဒါကြောင့်၊ နောက်ပိုင်းမှာတော့၊ "
+    "တစ်ဖက်မှာတော့၊ ရုတ်တရက်၊ ဒီအချိန်မှာ. Never use the same connector in two lines in a row. "
 
-    "ENDINGS: mix them naturally — ပါတယ်။ / တယ်။ / ဘူး။ / မယ်။. "
-    "Do NOT use ပါတယ်။ on every line. Aim for 2 out of 4 lines with ပါတယ်။, "
-    "the rest with တယ်။ or ဘူး။. Never end with the literary ၏ / သည်။. "
+    "SPEECH: report what characters say in the narrator's voice, with a variety of verbs: "
+    "လို့ ပြောပါတယ်၊ လို့ မေးပါတယ်၊ လို့ ဖြေပါတယ်၊ လို့ ရှင်းပြပါတယ်၊ လို့ သတိပေးပါတယ်၊ "
+    "လို့ အော်ပါတယ်၊ လို့ ငြင်းပါတယ်. No quotation marks. "
 
-    "CONNECTORS: အဲ့ဒါနဲ့၊ ဒါပေမဲ့၊ အဲဒီအချိန်မှာပဲ၊ ပြီးတော့၊ အဲ့တော့၊ ဒါကြောင့်၊ "
-    "နောက်ပိုင်းမှာတော့၊ တစ်ဖက်မှာတော့၊ ရုတ်တရက်. "
-    "Never use the same connector in two lines in a row. "
+    "NAMES: write every character name in Burmese script (transliterate it), the same way "
+    "every time, and use the name as the subject (ဝါလ်တာက ...၊ လန်စ်က ...). Never leave "
+    "English or Chinese letters in the output. When a name is unknown use a role word "
+    "(အမေ၊ သူငယ်ချင်း၊ သူဌေး၊ ကောင်မလေး၊ ဦးကြီး) or leave the subject out. Never write "
+    "လူတစ်ယောက်. Use သူ only when it is perfectly clear who is meant. "
 
-    "SPEECH: report what characters say in the narrator's voice: လို့ ပြောတယ် / မေးတယ် / "
-    "ဖြေတယ် / ရှင်းပြတယ် / သတိပေးတယ် / အော်တယ် / ငြင်းတယ်. No quotation marks. "
-    "Vary the verb — never the same one twice in a row. "
+    "TRANSLATE MEANING: do not translate word by word. Convert idioms and slang into natural "
+    "spoken Burmese. Mention the emotion when the scene shows it (စိတ်တိုတိုနဲ့၊ ဝမ်းသာသွားပြီး၊ "
+    "အံ့ဩသွားပြီး). "
 
-    "NAMES: write every character name in Burmese script (transliterate it), the same "
-    "spelling every time. Use the name as subject (ဝါလ်တာက ...). "
-    "Never leave English or Chinese letters. "
-    "Unknown name → role word (အမေ၊ သူငယ်ချင်း၊ သူဌေး၊ ကောင်မလေး၊ ဦးကြီး). "
-    "Never write လူတစ်ယောက်. Use သူ only when it is perfectly clear who is meant. "
-
-    "TRANSLATE MEANING: do not translate word by word. Convert idioms and slang into "
-    "natural spoken Burmese. Show emotion through word choice (စိတ်တိုတိုနဲ့၊ "
-    "ဝမ်းသာသွားပြီး၊ အံ့ဩသွားပြီး). "
-
-    "SENTENCES: keep them short to medium, one idea each, with ၊ at breath points and ။ "
-    "at the end. Clean Burmese with normal spacing. "
+    "SENTENCES: keep them short to medium, one idea each, with a comma-type ၊ at breath points "
+    "and ။ at the end. Write clean Burmese with normal spacing between phrases. "
 
     "STYLE EXAMPLES (copy the TONE only, never the content): "
-    "'သူမ အိမ်ပြန်ရောက်တော့ တံခါးက ဖွင့်ထားတယ်။ သူမ တော်တော် လန့်သွားတယ်။' "
-    "'အဲဒီအချိန်မှာပဲ ဖုန်းမြည်လာတယ်။ သူမ ဖုန်းကို ကောက်ကိုင်လိုက်တယ်။' "
-    "'သူ့အမေက ဒီအကြောင်း သိတာနဲ့ ချက်ချင်း ဒေါသထွက်သွားတယ်။' "
-    "'ဒါပေမဲ့ သူ ဘာမှ မပြောဘူး။ ငြိမ်ငြိမ်ပဲ ထိုင်နေတယ်။' "
-    "'ကမ္ဘာပေါ်မှာ လူဆိုး လူကောင်းဆိုတာ မရှိဘူး၊ လူက လူပဲလို့ ဝါလ်တာက ပြောတယ်။' "
+    "'ဝိုင်းလ်ဒါဆိုတဲ့ ကောင်လေးက ငယ်ငယ်ထဲကတည်းက ဉာဏ်ကောင်းတဲ့ ကလေးတစ်ယောက် ဖြစ်ပါတယ်။' "
+    "'ဒါပေမဲ့ တစ်ယောက်တည်းပဲ လှုပ်ရှားတတ်တဲ့ လန်စ်က အဖွဲ့တွေကို မခေါ်ဘဲ တစ်ယောက်တည်း ဝင်သွားပါတယ်။' "
+    "'စိတ်တိုသွားတဲ့ လန်စ်က ဖြေဆေးပေးဖို့ တောင်းပေမယ့် ဖြေဆေးက မရှိသေးပါဘူး။' "
+    "'အဲဒီအချိန်မှာပဲ မာစီနဲ့ သူ့အဖွဲ့တွေ ရောက်လာတာကြောင့် သူတို့နှစ်ယောက် ထွက်ပြေးကြပါတယ်။' "
+    "'ကမ္ဘာပေါ်မှာ လူဆိုး လူကောင်းဆိုတာ မရှိဘူး၊ လူက လူပဲလို့ ဝါလ်တာက ပြောပါတယ်။' "
 
     "NUMBERS: write numbers as Burmese words (၇၀ → ခုနစ်ဆယ်). "
 )
@@ -384,7 +369,6 @@ class Settings:
     max_speed: float = 1.25
     crop: bool = True             # auto-remove black bars
     flip: bool = True             # mirror horizontally
-    mirror_every: float = 5.0     # seconds between flips (0 = flip every frame = old behaviour)
     zoom: float = 1.0
     # Split
     split: bool = True            # ON / OFF switch for splitting
@@ -394,10 +378,10 @@ class Settings:
     sub_size: float = 7.0         # % of width
     sub_pos: int = 90             # 0 = top, 100 = bottom
     sub_alpha: int = 204
-    sub_sweep: bool = False       # music-style light sweep across the subtitle (default OFF)
+    sub_sweep: bool = True        # music-style light sweep across the subtitle
     font: str = ""                # explicit font path
     # Neon
-    neon: bool = False            # default OFF
+    neon: bool = True
     neon_th: int = 3
     neon_speed: float = 0.15      # laps per second
 
@@ -764,7 +748,7 @@ class Neon:
         fr[self.ys, self.xs] = strip[self.idx]
 
 
-def zoom_flip(fr, zoom, flip, t=0.0, mirror_every=5.0):
+def zoom_flip(fr, zoom, flip):
     zoomed = zoom > 1.001
     if zoomed:
         H, W = fr.shape[:2]
@@ -772,11 +756,7 @@ def zoom_flip(fr, zoom, flip, t=0.0, mirror_every=5.0):
         x0, y0 = (W - cw) // 2, (H - ch) // 2
         fr = cv2.resize(fr[y0:y0 + ch, x0:x0 + cw], (W, H), interpolation=cv2.INTER_LINEAR)
     if flip:
-        if mirror_every > 0:
-            if int(t / mirror_every) % 2 == 1:
-                return cv2.flip(fr, 1)
-        else:
-            return cv2.flip(fr, 1)
+        return cv2.flip(fr, 1)
     return fr if zoomed else fr.copy()
 
 
@@ -1242,7 +1222,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
             if fr is None:
                 break
             t = j / fps_out
-            fr = zoom_flip(fr, s.zoom, s.flip, t, s.mirror_every)
+            fr = zoom_flip(fr, s.zoom, s.flip)
             if neon:
                 neon.apply(fr, t)
             if subs and font_path:
@@ -1407,7 +1387,7 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     t = max(0.0, min(float(t), PREVIEW_SECS))
     base = _preview_frame_at(src, cache_dir, s.height, s.crop, t)
     H, W = base.shape[:2]
-    fr = zoom_flip(base.copy(), s.zoom, s.flip, t, s.mirror_every)
+    fr = zoom_flip(base.copy(), s.zoom, s.flip)
     if s.neon:
         _neon_for(W, H, s.neon_th, s.neon_speed).apply(fr, t)
     if font_path and s.sub:
@@ -1744,25 +1724,18 @@ def add_style_args(p):
                    help="black bar auto-crop မလုပ်ဘူး")
     g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP,
                    help="mirror မလုပ်ဘူး")
-    g.add_argument("--mirror-every", type=float, default=SUP,
-                   help="မည်မည်စက္ကန့်တိုင်း ဘယ်ညာလှန် (default 5) · 0 = frame တိုင်း လှန်")
     g.add_argument("--split", dest="split_min", type=float, default=SUP,
                    help="video ကို မိနစ်အလိုက် အပိုင်းခွဲ (default 2)")
     g.add_argument("--no-split", dest="split", action="store_false", default=SUP,
                    help="အပိုင်းခွဲတာ OFF (video တစ်ခုတည်း ထုတ်မယ်)")
     g = p.add_argument_group("subtitles / neon")
     g.add_argument("--no-sub", dest="sub", action="store_false", default=SUP)
-    g.add_argument("--sub-sweep", dest="sub_sweep", action="store_true", default=SUP,
-                   help="စာတန်း music sweep ဖွင့် (default OFF)")
     g.add_argument("--no-sweep", dest="sub_sweep", action="store_false", default=SUP,
-                   help="စာတန်း music sweep ပိတ် (default)")
+                   help="စာတန်း music sweep မထည့်ဘူး")
     g.add_argument("--sub-size", type=float, default=SUP, help="%% of width (3-12)")
     g.add_argument("--sub-pos", type=int, default=SUP, help="0=top 100=bottom")
     g.add_argument("--font", default=SUP, help="font file path")
-    g.add_argument("--neon", dest="neon", action="store_true", default=SUP,
-                   help="Neon border ဖွင့် (default OFF)")
-    g.add_argument("--no-neon", dest="neon", action="store_false", default=SUP,
-                   help="Neon border ပိတ် (default)")
+    g.add_argument("--no-neon", dest="neon", action="store_false", default=SUP)
     g.add_argument("--neon-th", type=int, default=SUP)
     g.add_argument("--neon-speed", type=float, default=SUP,
                    help="neon laps per second (default 0.15, lower = slower)")
@@ -1789,7 +1762,6 @@ def settings_for(proj, args):
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.split_min = max(0.0, float(s.split_min))
-    s.mirror_every = max(0.0, float(s.mirror_every))
     s.bgm_vol = max(0.0, min(1.0, float(s.bgm_vol)))
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
     s.loud_lufs = max(-24.0, min(-8.0, float(s.loud_lufs)))
@@ -2205,7 +2177,7 @@ def launch_ui():
     # ---------------- step 2 (tts + render + split)
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
-              height, fps, preset, max_speed, crop, flip, mirror_every, zoom,
+              height, fps, preset, max_speed, crop, flip, zoom,
               sub, sub_size, sub_pos, neon, sweep, split_on, split_min,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
@@ -2226,8 +2198,7 @@ def launch_ui():
             s.bgm, s.bgm_vol = _path(bgm_file), max(0.0, min(1.0, float(bgm_vol)))
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
-            s.max_speed, s.crop, s.flip = float(max_speed), bool(crop), bool(flip)
-            s.mirror_every, s.zoom = max(0.0, float(mirror_every)), float(zoom)
+            s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
             s.sub, s.sub_size, s.sub_pos, s.neon = bool(sub), float(sub_size), int(sub_pos), bool(neon)
             s.sub_sweep = bool(sweep)
             s.split = bool(split_on)
@@ -2296,7 +2267,7 @@ def launch_ui():
     # ---------------- layout
     with gr.Blocks(**blocks_kw) as demo:
         gr.Markdown(f"# 🎙️ Recap → Burmese / German  `v{__version__}`\n"
-                    f"Whisper → Gemini (Recap mode · {CHUNK} ကြောင်းစီ · chat တစ်ခုတည်း) → Edge TTS → Smart Sync → စာတန်း → 🎵 BGM ducking → ✂️ အပိုင်းခွဲ (ON/OFF)")
+                    f"Whisper → Gemini (Recap mode · {CHUNK} ကြောင်းစီ · chat တစ်ခုတည်း) → Edge TTS → Smart Sync → စာတန်း + Neon → 🎵 BGM ducking → ✂️ အပိုင်းခွဲ (ON/OFF)")
         pdir_state = gr.State("")
 
         height = gr.State(720)
@@ -2335,18 +2306,16 @@ def launch_ui():
         b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
         status_fetch = gr.Markdown()
 
-        gr.Markdown("### 🎨 စာတန်း / Mirror (Preview ကြည့်ပြီး ချိန်ပါ)")
+        gr.Markdown("### 🎨 စာတန်း / Neon (Preview ကြည့်ပြီး ချိန်ပါ)")
         pv_img = gr.Image(label="Preview", type="filepath", interactive=False)
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
                          label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့်)")
-        with gr.Accordion("🎛️ စာတန်း / Mirror / Neon", open=False):
+        with gr.Accordion("🎛️ စာတန်း / Neon / Mirror", open=False):
             with gr.Row():
                 sub = gr.Checkbox(True, label="စာတန်း")
-                sweep = gr.Checkbox(False, label="🎵 Music sweep (OFF)")
-                neon = gr.Checkbox(False, label="Neon (OFF)")
+                sweep = gr.Checkbox(True, label="🎵 Music sweep")
+                neon = gr.Checkbox(True, label="Neon")
                 flip = gr.Checkbox(True, label="Mirror")
-            mirror_every = gr.Slider(0.0, 10.0, value=5.0, step=0.5,
-                                     label="Mirror လှန်ချိန် (စက္ကန့်) · 0 = frame တိုင်း")
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
@@ -2411,7 +2380,7 @@ def launch_ui():
                          show_progress="hidden")
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
-                         height, fps, preset, max_speed, crop, flip, mirror_every, zoom,
+                         height, fps, preset, max_speed, crop, flip, zoom,
                          sub, sub_size, sub_pos, neon, sweep, split_on, split_min],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
