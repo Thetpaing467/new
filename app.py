@@ -6,9 +6,10 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang de
        python recap.py run <video|url> -d work/ep1 --lang en
        python recap.py run <video|url> -d work/ep1 --lang en --crop-mode custom --crop-box 0,10,0,20 --aspect 9:16
+       python recap.py run <video|url> -d work/ep1 --mirror-every 5
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.18.0"
+__version__ = "1.20.0"
 
 import argparse
 import asyncio
@@ -39,26 +40,27 @@ from PIL import Image, ImageDraw, ImageFont, features
 # ======================================================================
 # config
 # ======================================================================
-TARGET, MAXD = 4.2, 5.6          # Whisper segment merge targets (seconds)
-SUB_LINES = 2                    # subtitle box always has this many text lines
-PREVIEW_SECS = 5.0               # preview scrub range (seconds)
-CHUNK = 100                      # lines per Gemini prompt part
+TARGET, MAXD = 4.2, 5.6
+SUB_LINES = 2
+PREVIEW_SECS = 5.0
+CHUNK = 100
 
-# Crop aspect presets (width / height). "free" = no forced ratio.
 ASPECTS = {"free": None, "9:16": 9 / 16, "1:1": 1.0, "4:5": 4 / 5,
            "3:4": 3 / 4, "16:9": 16 / 9, "4:3": 4 / 3}
 
-# Default trim (Burmese / German) — silence trim + 0.2s pad
 TRIM = (
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,apad=pad_dur=0.2"
 )
 
-# English trim — GAPLESS: stronger silence threshold (-42dB) so the TTS lead-in / tail
-# silence is cut hard, keeps only 30ms, and NO apad → lines flow into each other.
 TRIM_EN = (
-    "silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.03,areverse,"
-    "silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.03,areverse"
+    "silenceremove=start_periods=1:start_threshold=-38dB:start_silence=0.02:"
+    "stop_periods=-1:stop_threshold=-38dB:stop_silence=0.02,"
+    "areverse,"
+    "silenceremove=start_periods=1:start_threshold=-38dB:start_silence=0.02:"
+    "stop_periods=-1:stop_threshold=-38dB:stop_silence=0.02,"
+    "areverse,"
+    "apad=pad_dur=0.04"
 )
 
 # ----------------------------------------------------------------------
@@ -100,7 +102,6 @@ _STORY_CORE = (
     "Keep the narrator calm, warm and clear, like someone summarising a TV drama episode to a "
     "friend. Each output line is ONE narrated passage that flows naturally like a real story; "
     "link actions with natural connectors. "
-
     "NATURAL TRANSLATION (very important): the source language can be English, Chinese, or any "
     "other language. DO NOT translate word-by-word or literally. Translate the MEANING, "
     "INTENTION and EMOTION, not just the words. Idioms, slang, proverbs and cultural references "
@@ -109,41 +110,30 @@ _STORY_CORE = (
     "situation. The result must sound like everyday spoken language, not like a machine, a "
     "dictionary or a textbook. If a translated line sounds confusing, unnatural or meaningless, "
     "REWRITE it until it sounds natural. "
-
     "INNER THOUGHTS & MOTIVES: do not just state what happened, show HOW it happened. Add the "
     "emotion and tone of the character when the scene makes it clear (angrily shouted, whispered "
     "with tears, smiled coldly). Make the listener feel the scene like a movie. "
-
     "SMOOTH TRANSITIONS: use varied transition words to connect scenes (at that moment, "
     "meanwhile, suddenly, but then). Never repeat the same connector or the same sentence "
     "opening in consecutive lines. "
-
     "HIGHLIGHT PLOT TWISTS: when there is a surprising turn in the story, emphasize it with "
     "dramatic but natural phrasing so the listener feels the shock. "
-
     "VOICE TONE & PITCH: let the words themselves carry the character's emotion. A question "
     "should sound like a real question, shock should sound astonished, anger should sound sharp. "
-
     "SENTENCE SEGMENTATION: keep sentences short and punchy. Break long thoughts into two or "
     "three short sentences so the speech engine can read them with natural pauses and "
     "intonation. "
-
     "NUMBERS & SYMBOLS: always write numbers, percentages, currencies and symbols as spoken "
     "words in the target language, so the speech engine reads them naturally. "
-
     "RELATIONSHIP DYNAMICS: state the relationship between characters when it matters "
     "(Mike's boss Jake, Mike's ex-girlfriend Mary) so the listener keeps track of who is who. "
-
     "EMPHASIS ON KEY POINTS: use strong, clear language for the most important moments "
     "(the big win, the big fight) so the listener remembers them. "
-
     "CONTEXT & BACKGROUND: if the listener needs background to understand a scene, add it "
     "briefly and naturally, but only from what the source lines make clear. "
-
     "Keep insults, jokes, arguments and emotions of the original, but report them rather than "
     "act them out. Do NOT add hooks, questions to the viewer, commentary or facts that are not "
     "in the source lines. Do NOT address the audience. "
-
     "CHARACTER NAMES: if a character's name is clearly spoken in the source lines, use ONLY that "
     "name for the character and spell it the same way every time. "
     "Speech-to-text often misspells names: if two similar-sounding names appear, treat them as "
@@ -155,38 +145,30 @@ _STORY_MY = (
     "retelling the story to viewers in third person, present tense, using the character names. "
     "Do NOT use ကျွန်တော်, do NOT use ဗျ, do NOT add your own opinions, jokes or comparisons. "
     "Just tell what happens, clearly and smoothly, in the order it happens. "
-
     "ENDINGS: most lines end with ပါတယ်။ (about three lines out of four). Use plain တယ်။ or "
     "ပါဘူး။ only now and then for variety. Never end with the literary ၏ / သည်။. "
-
     "CONNECTORS: link the events with natural spoken connectors and vary them: "
     "အဲ့ဒါနဲ့၊ ဒါပေမဲ့၊ အဲဒီအချိန်မှာပဲ၊ ပြီးတော့၊ အဲ့တော့၊ ဒါကြောင့်၊ နောက်ပိုင်းမှာတော့၊ "
     "တစ်ဖက်မှာတော့၊ ရုတ်တရက်၊ ဒီအချိန်မှာ. Never use the same connector in two lines in a row. "
-
     "SPEECH: report what characters say in the narrator's voice, with a variety of verbs: "
     "လို့ ပြောပါတယ်၊ လို့ မေးပါတယ်၊ လို့ ဖြေပါတယ်၊ လို့ ရှင်းပြပါတယ်၊ လို့ သတိပေးပါတယ်၊ "
     "လို့ အော်ပါတယ်၊ လို့ ငြင်းပါတယ်. No quotation marks. "
-
     "NAMES: write every character name in Burmese script (transliterate it), the same way "
     "every time, and use the name as the subject (ဝါလ်တာက ...၊ လန်စ်က ...). Never leave "
     "English or Chinese letters in the output. When a name is unknown use a role word "
     "(အမေ၊ သူငယ်ချင်း၊ သူဌေး၊ ကောင်မလေး၊ ဦးကြီး) or leave the subject out. Never write "
     "လူတစ်ယောက်. Use သူ only when it is perfectly clear who is meant. "
-
     "TRANSLATE MEANING: do not translate word by word. Convert idioms and slang into natural "
     "spoken Burmese. Mention the emotion when the scene shows it (စိတ်တိုတိုနဲ့၊ ဝမ်းသာသွားပြီး၊ "
     "အံ့ဩသွားပြီး). "
-
     "SENTENCES: keep them short to medium, one idea each, with a comma-type ၊ at breath points "
     "and ။ at the end. Write clean Burmese with normal spacing between phrases. "
-
     "STYLE EXAMPLES (copy the TONE only, never the content): "
     "'ဝိုင်းလ်ဒါဆိုတဲ့ ကောင်လေးက ငယ်ငယ်ထဲကတည်းက ဉာဏ်ကောင်းတဲ့ ကလေးတစ်ယောက် ဖြစ်ပါတယ်။' "
     "'ဒါပေမဲ့ တစ်ယောက်တည်းပဲ လှုပ်ရှားတတ်တဲ့ လန်စ်က အဖွဲ့တွေကို မခေါ်ဘဲ တစ်ယောက်တည်း ဝင်သွားပါတယ်။' "
     "'စိတ်တိုသွားတဲ့ လန်စ်က ဖြေဆေးပေးဖို့ တောင်းပေမယ့် ဖြေဆေးက မရှိသေးပါဘူး။' "
     "'အဲဒီအချိန်မှာပဲ မာစီနဲ့ သူ့အဖွဲ့တွေ ရောက်လာတာကြောင့် သူတို့နှစ်ယောက် ထွက်ပြေးကြပါတယ်။' "
     "'ကမ္ဘာပေါ်မှာ လူဆိုး လူကောင်းဆိုတာ မရှိဘူး၊ လူက လူပဲလို့ ဝါလ်တာက ပြောပါတယ်။' "
-
     "NUMBERS: write numbers as Burmese words (၇၀ → ခုနစ်ဆယ်). "
 )
 
@@ -194,22 +176,18 @@ _STORY_DE = (
     "GERMAN STORYTELLER VOICE (very important): write like a real German person who tells a "
     "friend over coffee what happened in a series. It must NOT sound like a translation, a "
     "newspaper article, a school essay or a subtitle file. "
-
     "TENSE: tell the whole recap in the present tense (Präsens), the way people retell a film: "
     "'Xiao Li kommt nach Hause und sieht, dass die Tür offen steht.' Use Perfekt or Plusquamperfekt "
     "only for things that happened earlier ('Das hatte sie ihm schon vor Jahren versprochen.'). "
     "Do not use the literary Präteritum for narration ('erwiderte er', 'entgegnete sie'). "
-
     "REPORTED SPEECH, THE SPOKEN WAY: use a normal 'dass' clause or a plain main clause: "
     "'Sie sagt, dass sie keine Lust mehr hat.' or 'Sie sagt, sie hat keine Lust mehr.' "
     "NEVER use the stiff Konjunktiv I ('sie habe', 'er sei', 'sie wolle') — nobody speaks like that. "
-
     "REPORTING VERBS (very important): never the same reporting verb in two consecutive lines, "
     "and 'sagt' at most once every four lines. Rotate: fragt, antwortet, erklärt, meint, "
     "erwidert, ruft, schreit, flüstert, warnt, verspricht, streitet ab, gibt zu, lacht, droht, "
     "bittet, murmelt, fährt sie an, hakt nach. When the action already shows it, drop the "
     "reporting verb and just state what the person does. "
-
     "SPOKEN GERMAN FEEL: use everyday words and, sparingly, modal particles where they really fit "
     "(doch, ja, halt, eben, mal, schon, eigentlich, denn, ausgerechnet) — not in every line. "
     "Contractions like 'ist's', 'gibt's', 'hat's' are fine. "
@@ -217,40 +195,32 @@ _STORY_DE = (
     "miteinander'; NOT 'Sie trifft die Entscheidung zu gehen' but 'Sie beschließt zu gehen'. "
     "No office German (Behördendeutsch), no Nominalstil, no 'bezüglich', 'diesbezüglich', "
     "'hinsichtlich', 'jedoch' in every line. "
-
     "SENTENCE VARIETY: mix short lines ('Die Tür ist offen.') with medium ones. Do not start "
     "every sentence with the character's name; sometimes start with a time or place "
     "('Am nächsten Morgen ...', 'Kurz darauf ...', 'Draußen im Flur ...'). Do not start more "
     "than two lines in a row with the same word. Keep the verb in second position and avoid long "
     "nested sentences (Schachtelsätze). "
-
     "CONNECTORS: vary them — und dann, aber, plötzlich, kurz darauf, währenddessen, trotzdem, "
     "dabei, ausgerechnet, kaum ist sie da, inzwischen, auf einmal, nur leider. "
-
     "IDIOMS: never translate Chinese or English idioms literally. Replace them with a German "
     "expression that people really say, or just say plainly what is meant. "
-
     "PRONOUNS: use er, sie, ihm, ihr, ihnen naturally so the text flows and does not repeat "
     "names all the time. If two characters of the same gender are in the scene, use the name or "
     "a role word (die Mutter, der Chef) instead, so nobody gets mixed up. "
-
     "NAMES: keep Chinese and other Asian names in their Latin / Pinyin spelling, exactly the same "
     "every time, never translate them. If a name is not known, never write 'die Person', "
     "'jemand' or 'eine Person'. Use a simple role word from the context (die Mutter, der Vater, "
     "der Chef, die Nachbarin, die Freundin) or a look-based word: der junge Mann, die junge "
     "Frau, der alte Mann, die ältere Frau, das kleine Mädchen — and keep the same word for the "
     "same person. "
-
     "NUMBERS & SYMBOLS (German): write everything as words, never digits or symbols: "
     "'50%' -> 'fünfzig Prozent', '100 Dollar' -> 'hundert Dollar', '3 Uhr' -> 'drei Uhr', "
     "'2019' -> 'zweitausendneunzehn', '1,5 Millionen' -> 'eineinhalb Millionen'. "
     "No abbreviations: 'zum Beispiel' instead of 'z. B.', 'und so weiter' instead of 'usw.'. "
-
     "EMOTION: show feelings through word choice and rhythm: 'Sie schreit ihn an', 'er flüstert "
     "mit Tränen in den Augen', 'sie lächelt kalt', 'er traut seinen Ohren nicht'. A question a "
     "character asks should come across as a real question: 'Sie fragt ihn, woher er das "
     "überhaupt weiß.' "
-
     "FINAL SELF-CHECK for every line: imagine reading it aloud to a friend. If it sounds like a "
     "translation, a textbook or a robot, rewrite it in the way a native German would really "
     "say it. "
@@ -262,11 +232,9 @@ _STORY_EN = (
     "like a movie trailer narrator telling the story to a viewer who cannot look away. It must "
     "NOT sound like a news article, a Wikipedia summary, a translated textbook, or a flat "
     "subtitle file. "
-
     "TENSE: tell the whole recap in the simple present tense, the way people retell a film: "
     "'Xiao Li comes home and sees that the door is open.' Use past perfect only for things that "
     "happened earlier ('She had promised him that years ago.'). Do not mix tenses. "
-
     "SENTENCE RHYTHM — the heart of the dramatic style: mix VERY short punchy lines with "
     "medium flowing ones. A short line of two or three words is allowed and powerful ('A scream.', "
     "'Then everything changed.', 'But he did not explode.'). Never write three long sentences "
@@ -275,60 +243,48 @@ _STORY_EN = (
     "conjunction ('But...', 'And then...', 'Only then...'). Do not start more than two lines "
     "in a row with the same word. Avoid long nested sentences — the TTS engine must never run "
     "out of breath. "
-
     "REPORTED SPEECH, THE SPOKEN WAY: use a natural 'that' clause or plain reporting: "
     "'She says she's had enough.' or 'He tells her that he's leaving.' "
     "NEVER use stiff literary reported speech ('she stated that she would henceforth...'). "
-
     "REPORTING VERBS (very important): never the same reporting verb in two consecutive "
     "lines, and 'says' at most once every four lines. Rotate: asks, answers, snaps, shouts, "
     "whispers, warns, promises, denies, admits, laughs, threatens, begs, mutters, fires back, "
     "presses. When the action already shows it, drop the reporting verb and just state what the "
     "person does. "
-
     "EMOTIONAL LANGUAGE (the dramatic edge): name the emotion when the scene shows it "
     "(furious, shattered, relieved, cold, heartbroken, stunned). Show how a person moves or "
     "speaks (trembles, storms out, goes pale, slams the door, holds back tears, freezes, "
     "screams). This is what makes the recap feel alive. "
-
     "PLOT TWISTS — the hook: when the story turns, make it hit hard with a short, sharp "
     "sentence ('Only then does he realize the truth.', 'In that moment, everything clicks.', "
     "'But the truth is far worse.'). Do not overuse this — one strong hit per scene is enough. "
-
     "SPOKEN ENGLISH FEEL: use everyday words and contractions (it's, he's, they're, "
     "gonna, wanna, kinda — but not in every line). Prefer lively verbs to noun phrases: "
     "NOT 'He engages in a conversation with her' but 'They talk'; NOT 'She makes the "
     "decision to leave' but 'She decides to leave.' No business English, no "
     "'utilize', 'commence', 'prior to', 'in order to' in every line. "
-
     "CONNECTORS: vary them — but, and then, suddenly, a moment later, meanwhile, "
     "out of nowhere, only then, still, yet, of all people, hardly is she inside when, "
     "in the meantime, all at once. "
-
     "IDIOMS: never translate Chinese or other idioms literally. Replace them with an "
     "English expression that people really say, or just say plainly what is meant. "
-
     "PRONOUNS: use he, she, him, her, they, them naturally so the text flows and does "
     "not repeat names all the time. If two characters of the same gender are in the scene, "
     "use the name or a role word (his mother, the boss) instead, so nobody gets mixed up. "
-
     "NAMES: keep Chinese and other Asian names in their Latin / Pinyin spelling, exactly "
     "the same every time, never translate them. If a name is not known, never write 'the "
     "person', 'someone' or 'a person'. Use a simple role word from the context (the mother, "
     "the father, the boss, the neighbour, the girlfriend) or a look-based word: the young "
     "man, the young woman, the old man, the older woman, the little girl — and keep the "
     "same word for the same person. "
-
     "NUMBERS & SYMBOLS (English): write everything as words, never digits or symbols: "
     "'50%' -> 'fifty percent', '100 dollars' -> 'a hundred dollars', '3 o'clock' -> "
     "'three o'clock', '2019' -> 'twenty nineteen', '1.5 million' -> 'one and a half "
     "million'. No abbreviations: 'for example' instead of 'e.g.', 'and so on' instead "
     "of 'etc.'. "
-
     "NO QUOTES, NO EMOJI, NO BRACKETS: never use quotation marks, emoji, brackets, "
     "asterisks or stage directions. The narration is spoken, not acted. Report the dialogue "
     "in third person and let the narration carry the emotion through word choice. "
-
     "FINAL SELF-CHECK for every line: imagine reading it aloud to a friend in a low, "
     "tense voice. If it sounds like a translation, a textbook or a robot, rewrite it the way "
     "a native English narrator of a hit drama recap channel would really say it. "
@@ -421,7 +377,7 @@ LANG_CONF = {
         "label": "အင်္ဂလိပ်",
         "sample": "This is a sample subtitle line.",
         "rate": 5,
-        "trim": TRIM_EN,   # English only — gapless (hard silence trim, no apad)
+        "trim": TRIM_EN,
         "edge_voices": [
             ("en-US-AriaNeural", "Aria (female, US)"),
             ("en-US-GuyNeural", "Guy (male, US)"),
@@ -484,16 +440,16 @@ class Settings:
     fps: int = 24
     preset: str = "ultrafast"
     max_speed: float = 1.25
-    # crop: "auto" (black-bar detect) | "none" | "custom" (CapCut-style box)
     crop_mode: str = "auto"
-    crop_l: float = 0.0      # % trimmed from the left
-    crop_t: float = 0.0      # % trimmed from the top
-    crop_r: float = 0.0      # % trimmed from the right
-    crop_b: float = 0.0      # % trimmed from the bottom
-    aspect: str = "free"     # free | 9:16 | 1:1 | 4:5 | 3:4 | 16:9 | 4:3
-    flip: bool = True
+    crop_l: float = 0.0
+    crop_t: float = 0.0
+    crop_r: float = 0.0
+    crop_b: float = 0.0
+    aspect: str = "free"
+    flip: bool = True          # legacy: -1 => never mirror, 0 => constant mirror
+    mirror_every: float = 0.0  # NEW: seconds per mirror flip (0 = use flip only)
     zoom: float = 1.0
-    render_workers: int = 0  # parallel render chunks (0 = auto)
+    render_workers: int = 0
     sub: bool = True
     sub_size: float = 7.0
     sub_pos: int = 90
@@ -507,7 +463,6 @@ class Settings:
     @classmethod
     def from_dict(cls, d):
         d = dict(d or {})
-        # backward compat: old projects had a boolean `crop`
         if "crop" in d and "crop_mode" not in d:
             d["crop_mode"] = "auto" if d["crop"] else "none"
         names = {f.name for f in fields(cls)}
@@ -523,6 +478,18 @@ class Settings:
 
     def rate_str(self):
         return f"{self.resolved_rate():+d}%"
+
+    def mirror_phase(self, t):
+        """Return True if the frame at time `t` should be mirrored.
+        - mirror_every > 0: flip every `mirror_every` seconds (alternate on/off)
+        - mirror_every == 0: use flip as constant (legacy)
+        - mirror_every < 0: never mirror
+        """
+        if self.mirror_every < 0:
+            return False
+        if self.mirror_every == 0:
+            return bool(self.flip)
+        return (int(t // self.mirror_every) % 2 == 0)
 
 
 # ======================================================================
@@ -822,7 +789,7 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
             "xs": np.arange(bw, dtype=np.float32)[None, :, None]}
 
 
-_BLUR_DOWN = 4   # glass blur is computed at 1/4 resolution (much faster, looks the same)
+_BLUR_DOWN = 4
 
 
 def blend_overlay(fr, ov, p=None):
@@ -856,20 +823,13 @@ def blend_overlay(fr, ov, p=None):
 
 
 # ======================================================================
-# crop / zoom / flip (CapCut-style custom crop)
+# crop / zoom / mirror
 # ======================================================================
 def resolve_crop(src_w, src_h, s, auto=None):
-    """Return the kept rectangle (x, y, w, h) inside a src_w x src_h frame.
-
-    auto   -> black-bar rectangle from detect_crop() (w, h, x, y) or None
-    custom -> crop_l/t/r/b (% trimmed from each side) + optional aspect ratio
-              (the box is shrunk, centred, to fit the chosen ratio)
-    """
     full = (0, 0, src_w, src_h)
     mode = getattr(s, "crop_mode", "auto")
     if mode == "none":
         return full
-
     if mode == "custom":
         x0 = src_w * s.crop_l / 100.0
         y0 = src_h * s.crop_t / 100.0
@@ -892,8 +852,6 @@ def resolve_crop(src_w, src_h, s, auto=None):
         cw, ch = max(2, int(w) // 2 * 2), max(2, int(h) // 2 * 2)
         cw, ch = min(cw, src_w - cx), min(ch, src_h - cy)
         return (cx, cy, cw, ch)
-
-    # auto
     if auto and auto[1] < src_h * 0.95 and auto[0] > 0 and auto[1] > 0:
         cw, ch, cx, cy = auto
         cw, ch = min(cw, src_w - cx), min(ch, src_h - cy)
@@ -909,15 +867,14 @@ def zoom_rect(rect, zoom):
     return (x + (w - nw) // 2, y + (h - nh) // 2, nw, nh)
 
 
-def apply_view(fr, rect, W, H, flip, interp=cv2.INTER_LINEAR):
-    """crop + zoom (one rect) -> single resize -> optional mirror. Always returns a new array."""
+def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR):
     x, y, w, h = rect
     f = fr[y:y + h, x:x + w]
     if (w, h) != (W, H):
         f = cv2.resize(f, (W, H), interpolation=interp)
     else:
         f = f.copy()
-    if flip:
+    if mirror:
         f = cv2.flip(f, 1)
     return f
 
@@ -1292,10 +1249,11 @@ def prepare_video(src, dst, target_h, crop=True):
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
-    """Parallel render: the output timeline is split into N chunks, every chunk is
-    rendered by its own thread (own decoder + own ffmpeg encoder), then the chunks are
-    joined with a stream-copy concat and muxed with the audio. Crop + zoom is a single
-    rectangle -> one resize per frame; the mirror flip happens in the producer thread."""
+    """Parallel render with per-5s mirror support.
+
+    Mirror alternates ON/OFF every `s.mirror_every` seconds (in OUTPUT timeline).
+    Render chunks are aligned to the mirror boundary so no chunk spans a flip point.
+    """
     cap = cv2.VideoCapture(src)
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1308,29 +1266,64 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     W, H = out_size(base_rect, s.height)
     rect = zoom_rect(base_rect, s.zoom)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
-    flip = bool(s.flip)
+
+    mirror_every = float(s.mirror_every)
+    legacy_flip = bool(s.flip)
+    seg_len = mirror_every if mirror_every > 0 else 0.0
 
     fps_out = int(s.fps)
     nfr = max(1, int(round(total * fps_out)))
     fs = max(16, int(W * s.sub_size / 100))
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
 
+    def mirror_at(t):
+        """True = mirrored frame."""
+        if mirror_every < 0:
+            return False
+        if mirror_every == 0:
+            return legacy_flip
+        # alternate: [0..T) mirrored, [T..2T) not, ...
+        return (int(t // mirror_every) % 2 == 0)
+
     cpu = os.cpu_count() or 2
-    nw = int(s.render_workers) if int(s.render_workers) > 0 else min(cpu, 6)
-    nw = max(1, min(nw, nfr // max(fps_out * 3, 1) or 1))
-    edges = [int(round(nfr * i / nw)) for i in range(nw + 1)]
+    target_workers = int(s.render_workers) if int(s.render_workers) > 0 else min(cpu, 6)
+    target_workers = max(1, target_workers)
+
+    # Build chunk frame edges; snap to mirror boundaries so every chunk is uniform flip state
+    raw_edges = [int(round(nfr * i / target_workers)) for i in range(target_workers + 1)]
+    if seg_len > 0:
+        boundaries_fr = {0, nfr}
+        k = 1
+        while k * seg_len * fps_out < nfr:
+            boundaries_fr.add(int(round(k * seg_len * fps_out)))
+            k += 1
+        merged = set(raw_edges) | boundaries_fr
+        edges = sorted(merged)
+        # drop tiny chunks (< 1s) to avoid overhead
+        min_frames = fps_out
+        edges = [e for i, e in enumerate(edges)
+                 if i == 0 or i == len(edges) - 1 or (e - edges[i - 1]) >= min_frames
+                 or (edges[i + 1] - e) >= min_frames or (e - edges[i - 1]) < min_frames]
+        # ensure strictly increasing and dedup
+        edges = sorted(set(edges))
+    else:
+        edges = raw_edges
+
+    nw = len(edges) - 1
     counts = [0] * nw
-    per_threads = max(1, cpu // nw)
+    per_threads = max(1, cpu // max(1, nw))
     wd = os.path.dirname(os.path.abspath(out))
     tag = uuid.uuid4().hex[:6]
-    parts = [os.path.join(wd, f"_part{tag}_{i:02d}.mp4") for i in range(nw)]
+    parts = [os.path.join(wd, f"_part{tag}_{i:03d}.mp4") for i in range(nw)]
     abort = threading.Event()
 
     def worker(pi):
         j0, j1 = edges[pi], edges[pi + 1]
         cap_ = cv2.VideoCapture(src)
-        q = queue.Queue(maxsize=24)
+        q = queue.Queue(maxsize=48)
         lstop = threading.Event()
+        # mirror state is constant within the chunk (chunk boundaries align to seg_len)
+        chunk_mirror = mirror_at(j0 / fps_out)
 
         def put(x):
             while not lstop.is_set() and not abort.is_set():
@@ -1368,13 +1361,12 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                     if new:
                         ok, f = cap_.retrieve()
                         if ok:
-                            last = apply_view(f, rect, W, H, flip, interp)
+                            last = apply_view(f, rect, W, H, chunk_mirror, interp)
                     if last is None:
                         return
                     if not put(last.copy()):
                         return
             finally:
-                # the sentinel must always get through unless this worker is shutting down
                 while not lstop.is_set():
                     try:
                         q.put(None, timeout=0.5)
@@ -1384,10 +1376,13 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
 
         log_path = parts[pi] + ".log"
         log_fh = open(log_path, "wb")
-        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
+        cmd = ["ffmpeg", "-y", "-loglevel", "error",
+               "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-an",
-               "-c:v", "libx264", "-preset", s.preset, "-crf", "27", "-pix_fmt", "yuv420p",
-               "-threads", str(per_threads), parts[pi]]
+               "-c:v", "libx264", "-preset", s.preset, "-crf", "27",
+               "-tune", "zerolatency",
+               "-x264-params", "ref=1:bframes=0:scenecut=0:rc-lookahead=10:threads=" + str(per_threads),
+               "-pix_fmt", "yuv420p", "-threads", str(per_threads), parts[pi]]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                 stderr=log_fh)
         th = threading.Thread(target=producer, daemon=True)
@@ -1499,8 +1494,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
 
 # ---- preview
 def _preview_clip(src, clip_path, height):
-    """Short clip scaled to `height`, NO crop baked in (crop is applied per frame so the
-    custom-crop sliders update the preview instantly)."""
     if os.path.exists(clip_path) and os.path.getsize(clip_path) > 1000:
         return clip_path
     raw = clip_path + "_raw.mp4"
@@ -1554,7 +1547,6 @@ _PV_AUTO = {}
 
 
 def _guide_image(base, crop_rect, zoomed_rect):
-    """Full frame with the discarded area dimmed and the kept box outlined (CapCut-like)."""
     g = (base.astype(np.float32) * 0.30).astype(np.uint8)
     x, y, w, h = crop_rect
     g[y:y + h, x:x + w] = base[y:y + h, x:x + w]
@@ -1580,7 +1572,8 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     base_rect = resolve_crop(bw, bh, s, auto)
     W, H = out_size(base_rect, bh)
     rect = zoom_rect(base_rect, s.zoom)
-    fr = apply_view(base, rect, W, H, bool(s.flip))
+    mirror = s.mirror_phase(t) if hasattr(s, "mirror_phase") else bool(s.flip)
+    fr = apply_view(base, rect, W, H, mirror)
 
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
@@ -1709,7 +1702,6 @@ def _synthesize(proj, my_list, s, progress, proxy):
     wd = proj.path
     n = len(my_list)
     voice = s.resolved_voice()
-    # language-specific trim (English = gapless: hard silence trim, no apad)
     trim_filter = LANG_CONF[s.lang].get("trim", TRIM)
     sig_base = f"edge|{voice}|{s.rate_str()}|noref|{trim_filter}"
 
@@ -1894,8 +1886,10 @@ def add_style_args(p):
     g.add_argument("--zoom", type=float, default=SUP, help="1.0-1.25")
     g.add_argument("--render-workers", type=int, default=SUP,
                    help="parallel render chunks (0 = auto)")
+    g.add_argument("--mirror-every", type=float, default=SUP,
+                   help="Mirror ကို ဘယ်နှစ်စက္ကန့်တစ်ခါ လှန်မလဲ (ဥပမာ 5) · 0 = အမြဲ · -1 = မလုပ်ဘူး")
     g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP,
-                   help="mirror မလုပ်ဘူး")
+                   help="mirror ကို လုံးဝ မလုပ်ဘူး (mirror-every=0 ဖြစ်နေရင် အသုံးဝင်တယ်)")
     g = p.add_argument_group("crop")
     g.add_argument("--crop-mode", dest="crop_mode", choices=["auto", "none", "custom"],
                    default=SUP, help="auto = black-bar detect · custom = --crop-box")
@@ -1948,6 +1942,9 @@ def settings_for(proj, args):
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
     s.loud_lufs = max(-24.0, min(-8.0, float(s.loud_lufs)))
     s.render_workers = max(0, min(16, int(s.render_workers)))
+    if s.mirror_every is None:
+        s.mirror_every = 0.0
+    s.mirror_every = float(s.mirror_every)
     if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -2154,6 +2151,7 @@ def launch_ui():
         return lambda frac, label=None: progress(frac, desc=label or "")
 
     def _source(url, upload):
+        # upload widget is hidden but kept for local-file cases in future
         return _path(upload) or extract_url(url or "")
 
     def _pbar(frac, width=20):
@@ -2164,7 +2162,7 @@ def launch_ui():
     def _ensure_video(url, upload, height, cb):
         source = _source(url, upload)
         if not source:
-            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+            raise gr.Error("Video link ထည့်ပါ")
         key = source
         if os.path.isfile(source):
             key += f"|{os.path.getsize(source)}"
@@ -2194,7 +2192,8 @@ def launch_ui():
         "title": "Recap → Burmese / German / English",
         "theme": gr.themes.Base(primary_hue="indigo", secondary_hue="purple", neutral_hue="slate"),
         "css": ":root, html, body, gradio-app { color-scheme: dark; }"
-               " body, gradio-app, .gradio-container { background: #0b0f19 !important; }",
+               " body, gradio-app, .gradio-container { background: #0b0f19 !important; }"
+               " footer {display:none !important;}",
         "js": "() => { document.documentElement.classList.add('dark'); document.body.classList.add('dark'); }",
         "head": dark_head,
     }
@@ -2209,7 +2208,7 @@ def launch_ui():
 
     def start_fetch(url, upload, height):
         if not _source(url, upload):
-            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+            raise gr.Error("Video link ထည့်ပါ")
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None,
               "done": False, "t0": time.time()}
@@ -2231,10 +2230,11 @@ def launch_ui():
         threading.Thread(target=work, daemon=True).start()
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
-    # preview inputs (after pdir): lang_name, height, zoom, crop_mode, aspect,
-    #   crop_l, crop_t, crop_r, crop_b, flip, sub, sub_size, sub_pos, sweep, pv_t
+    # preview inputs order:
+    #   pdir, lang_name, height, zoom, crop_mode, aspect, crop_l, crop_t, crop_r, crop_b,
+    #   flip, mirror_every, sub, sub_size, sub_pos, sweep, pv_t
     def _preview(pdir, lang_name, height, zoom, crop_mode, aspect, cl, ct, cr, cb_,
-                 flip, sub, sub_size, sub_pos, sweep, pv_t, strict):
+                 flip, mirror_every, sub, sub_size, sub_pos, sweep, pv_t, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
@@ -2247,7 +2247,9 @@ def launch_ui():
             s.crop_mode = crop_mode if crop_mode in ("auto", "none", "custom") else "auto"
             s.aspect = aspect if aspect in ASPECTS else "free"
             s.crop_l, s.crop_t, s.crop_r, s.crop_b = float(cl), float(ct), float(cr), float(cb_)
-            s.flip, s.sub = bool(flip), bool(sub)
+            s.flip = bool(flip)
+            s.mirror_every = float(mirror_every)
+            s.sub = bool(sub)
             s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
             font = find_font(code, s.font) if s.sub else None
             for old in glob.glob(os.path.join(pdir, "preview_*.png")):
@@ -2292,7 +2294,7 @@ def launch_ui():
 
     def start_step1(url, upload, lang_name, model, src_lang, max_min, height):
         if not _source(url, upload):
-            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+            raise gr.Error("Video link ထည့်ပါ")
         code = LANGS[lang_name]
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "စတင်နေတယ်...", "res": None, "err": None,
@@ -2339,7 +2341,7 @@ def launch_ui():
 
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               height, fps, preset, max_speed,
-              crop_mode, aspect, cl, ct, cr, cb_, flip, zoom,
+              crop_mode, aspect, cl, ct, cr, cb_, flip, mirror_every, zoom,
               sub, sub_size, sub_pos, sweep, rworkers,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
@@ -2359,6 +2361,7 @@ def launch_ui():
             s.rate, s.tts_workers = int(rate), int(workers)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.flip, s.zoom = float(max_speed), bool(flip), float(zoom)
+            s.mirror_every = float(mirror_every)
             s.crop_mode = crop_mode if crop_mode in ("auto", "none", "custom") else "auto"
             s.aspect = aspect if aspect in ASPECTS else "free"
             s.crop_l, s.crop_t, s.crop_r, s.crop_b = float(cl), float(ct), float(cr), float(cb_)
@@ -2432,35 +2435,37 @@ def launch_ui():
         gr.Markdown("### 📥 Video")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
                          placeholder="https://...")
-        upload = gr.File(label="(သို့) Video ဖိုင်တင်", type="filepath",
-                         file_types=[".mp4", ".mov", ".mkv", ".webm", ".m4v"])
+        # (upload widget removed — link only)
+        upload = gr.State("")
         b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
         status_fetch = gr.Markdown()
 
-        gr.Markdown("### 🎨 Preview (Crop + စာတန်း)")
+        gr.Markdown("### 🎨 Preview")
         pv_img = gr.Image(label="Preview (ရလဒ်)", type="filepath", interactive=False)
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
                          label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့်)")
 
-        with gr.Accordion("✂️ Crop (CapCut လို custom crop)", open=True):
-            crop_mode = gr.Radio([("Auto (black bar)", "auto"), ("မဖြတ်ဘူး", "none"),
-                                  ("✂️ Custom", "custom")], value="auto", label="Crop mode")
-            guide_img = gr.Image(label="Crop guide — အစိမ်းရောင်ဘောင်ထဲက အပိုင်းကိုပဲ ယူမယ်၊ မှောင်နေတာ ဖြတ်ထုတ်မယ်",
-                                 type="filepath", interactive=False)
-            aspect = gr.Dropdown(list(ASPECTS), value="free",
-                                 label="Aspect ratio (Custom မှာသာ — free = အလိုအတိုင်း)")
-            with gr.Row():
-                crop_l = gr.Slider(0, 45, value=0, step=0.5, label="ဘယ်ဘက် ဖြတ် %")
-                crop_r = gr.Slider(0, 45, value=0, step=0.5, label="ညာဘက် ဖြတ် %")
-            with gr.Row():
-                crop_t = gr.Slider(0, 45, value=0, step=0.5, label="အပေါ် ဖြတ် %")
-                crop_b = gr.Slider(0, 45, value=0, step=0.5, label="အောက် ဖြတ် %")
+        gr.Markdown("### ✂️ Crop (CapCut လို custom crop)")
+        crop_mode = gr.Radio([("Auto (black bar)", "auto"), ("မဖြတ်ဘူး", "none"),
+                              ("✂️ Custom", "custom")], value="auto", label="Crop mode")
+        guide_img = gr.Image(label="Crop guide — အစိမ်းရောင်ဘောင်ထဲက အပိုင်းကိုပဲ ယူမယ်၊ မှောင်နေတာ ဖြတ်ထုတ်မယ်",
+                             type="filepath", interactive=False)
+        aspect = gr.Dropdown(list(ASPECTS), value="free",
+                             label="Aspect ratio (Custom မှာသာ — free = အလိုအတိုင်း)")
+        with gr.Row():
+            crop_l = gr.Slider(0, 45, value=0, step=0.5, label="ဘယ်ဘက် ဖြတ် %")
+            crop_r = gr.Slider(0, 45, value=0, step=0.5, label="ညာဘက် ဖြတ် %")
+        with gr.Row():
+            crop_t = gr.Slider(0, 45, value=0, step=0.5, label="အပေါ် ဖြတ် %")
+            crop_b = gr.Slider(0, 45, value=0, step=0.5, label="အောက် ဖြတ် %")
 
         with gr.Accordion("🎛️ စာတန်း / Mirror / Render", open=False):
             with gr.Row():
                 sub = gr.Checkbox(True, label="စာတန်း")
                 sweep = gr.Checkbox(True, label="🎵 Music sweep")
-                flip = gr.Checkbox(True, label="Mirror")
+                flip = gr.Checkbox(True, label="Mirror (legacy: constant)")
+            mirror_every = gr.Slider(-1, 30, value=5, step=1,
+                                     label="🔁 Mirror လှန်ချိန် (စက္ကန့်) — 5 = 5စက္ကန့်တစ်ခါ · 0 = အမြဲ · -1 = မလုပ်ဘူး")
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
@@ -2468,16 +2473,16 @@ def launch_ui():
                                  label="Render တစ်ပြိုင်နက် (0 = auto · CPU core အလိုက်)")
 
         pv_in = [pdir_state, lang, height, zoom, crop_mode, aspect, crop_l, crop_t, crop_r,
-                 crop_b, flip, sub, sub_size, sub_pos, sweep, pv_t]
+                 crop_b, flip, mirror_every, sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
-        for trig in (url.submit, b_fetch.click, upload.upload):
+        for trig in (url.submit, b_fetch.click):
             trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, guide_img, fetch_timer],
                          show_progress="hidden")
         for c in (sub_size, sub_pos, zoom, sub, sweep, flip, crop_mode, aspect, crop_l,
-                  crop_t, crop_r, crop_b, lang, pv_t):
+                  crop_t, crop_r, crop_b, lang, pv_t, mirror_every):
             c.change(preview_auto, pv_in, [pv_img, guide_img],
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
@@ -2521,7 +2526,8 @@ def launch_ui():
                          show_progress="hidden")
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          height, fps, preset, max_speed,
-                         crop_mode, aspect, crop_l, crop_t, crop_r, crop_b, flip, zoom,
+                         crop_mode, aspect, crop_l, crop_t, crop_r, crop_b, flip,
+                         mirror_every, zoom,
                          sub, sub_size, sub_pos, sweep, rworkers],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
