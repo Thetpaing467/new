@@ -3,13 +3,11 @@
 Languages: Burmese (my) / German (de) / English (en)   ·   Sources: YouTube / TikTok (yt-dlp), Rednote, local file
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
-       python recap.py run <video|url> -d work/ep1 --lang de
        python recap.py run <video|url> -d work/ep1 --lang en
-       python recap.py run <video|url> -d work/ep1 --lang en --crop-mode custom --crop-box 0,10,0,20 --aspect 9:16
-       python recap.py run <video|url> -d work/ep1 --mirror-every 5
+       python recap.py run <video|url> -d work/ep1 --lang en --mirror-every 5
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.20.0"
+__version__ = "1.21.0"
 
 import argparse
 import asyncio
@@ -63,9 +61,6 @@ TRIM_EN = (
     "apad=pad_dur=0.04"
 )
 
-# ----------------------------------------------------------------------
-# Prompt building blocks
-# ----------------------------------------------------------------------
 _HUMAN = (
     "VOICE STYLE (very important): the result will be read aloud by a speech engine, so it must "
     "sound like a real human storyteller talking to a friend, NOT a robot reading text. "
@@ -304,27 +299,22 @@ def _tail(script, accent, story):
 
 LANG_CONF = {
     "my": {
-        "name": "Burmese",
-        "label": "မြန်မာ",
+        "name": "Burmese", "label": "မြန်မာ",
         "sample": "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။",
-        "rate": 45,
-        "trim": TRIM,
-        "edge_voices": [
-            ("my-MM-ThihaNeural", "Thiha (male)"),
-            ("my-MM-NilarNeural", "Nilar (female)"),
-        ],
+        "rate": 45, "trim": TRIM,
+        "edge_voices": [("my-MM-ThihaNeural", "Thiha (male)"),
+                        ("my-MM-NilarNeural", "Nilar (female)")],
         "sentence_end": r"(?<=။)",
         "prompt": (
             "You are a Burmese (Myanmar) movie/drama recap narrator. Turn every numbered "
             "line below into natural spoken Burmese recap narration (calm third-person storyteller "
             "style). "
-            + _tail(
-                script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
-                accent=("Speak calm, clear, everyday Burmese like a recap narrator. Mostly end lines "
-                        "with ပါတယ်။ Do not translate word by word: translate the meaning and "
-                        "feeling, and turn idioms into natural Burmese. Use '၊' at breath points "
-                        "and '။' at the end."),
-                story=_STORY_MY)
+            + _tail(script="use ONLY Burmese script (Myanmar Unicode), no English/Chinese letters.",
+                    accent=("Speak calm, clear, everyday Burmese like a recap narrator. Mostly end lines "
+                            "with ပါတယ်။ Do not translate word by word: translate the meaning and "
+                            "feeling, and turn idioms into natural Burmese. Use '၊' at breath points "
+                            "and '။' at the end."),
+                    story=_STORY_MY)
         ),
         "chunk_note": (
             _RECAP_NOTE +
@@ -337,28 +327,23 @@ LANG_CONF = {
         "is_mm": True,
     },
     "de": {
-        "name": "German",
-        "label": "ဂျာမနီ",
+        "name": "German", "label": "ဂျာမနီ",
         "sample": "Dies ist ein Beispiel-Untertitel.",
-        "rate": 10,
-        "trim": TRIM,
-        "edge_voices": [
-            ("de-DE-KatjaNeural", "Katja (female)"),
-            ("de-DE-ConradNeural", "Conrad (male)"),
-            ("de-DE-AmalaNeural", "Amala (female)"),
-            ("de-DE-BerndNeural", "Bernd (male)"),
-        ],
+        "rate": 10, "trim": TRIM,
+        "edge_voices": [("de-DE-KatjaNeural", "Katja (female)"),
+                        ("de-DE-ConradNeural", "Conrad (male)"),
+                        ("de-DE-AmalaNeural", "Amala (female)"),
+                        ("de-DE-BerndNeural", "Bernd (male)")],
         "sentence_end": r"(?<=[.!?])\s+",
         "prompt": (
             "You are a native German (Deutsch) storyteller who retells TV dramas to friends in a "
             "recap video. Rewrite every numbered line below as natural, relaxed, spoken German — "
             "the way a real person would tell it, not a translation. "
-            + _tail(
-                script="use ONLY German (Latin script), no Chinese letters.",
-                accent=("Speak relaxed, everyday German as in a chat with a friend: contractions "
-                        "like 'ist's', 'gibt's', 'hat's' are fine, and put a comma at every "
-                        "natural breath point."),
-                story=_STORY_DE)
+            + _tail(script="use ONLY German (Latin script), no Chinese letters.",
+                    accent=("Speak relaxed, everyday German as in a chat with a friend: contractions "
+                            "like 'ist's', 'gibt's', 'hat's' are fine, and put a comma at every "
+                            "natural breath point."),
+                    story=_STORY_DE)
         ),
         "chunk_note": (
             _RECAP_NOTE +
@@ -373,31 +358,26 @@ LANG_CONF = {
         "is_mm": False,
     },
     "en": {
-        "name": "English",
-        "label": "အင်္ဂလိပ်",
+        "name": "English", "label": "အင်္ဂလိပ်",
         "sample": "This is a sample subtitle line.",
-        "rate": 5,
-        "trim": TRIM_EN,
-        "edge_voices": [
-            ("en-US-AriaNeural", "Aria (female, US)"),
-            ("en-US-GuyNeural", "Guy (male, US)"),
-            ("en-US-JennyNeural", "Jenny (female, US)"),
-            ("en-GB-SoniaNeural", "Sonia (female, UK)"),
-            ("en-GB-RyanNeural", "Ryan (male, UK)"),
-            ("en-AU-NatashaNeural", "Natasha (female, AU)"),
-        ],
+        "rate": 5, "trim": TRIM_EN,
+        "edge_voices": [("en-US-AriaNeural", "Aria (female, US)"),
+                        ("en-US-GuyNeural", "Guy (male, US)"),
+                        ("en-US-JennyNeural", "Jenny (female, US)"),
+                        ("en-GB-SoniaNeural", "Sonia (female, UK)"),
+                        ("en-GB-RyanNeural", "Ryan (male, UK)"),
+                        ("en-AU-NatashaNeural", "Natasha (female, AU)")],
         "sentence_end": r"(?<=[.!?])\s+",
         "prompt": (
             "You are a dramatic English drama-recap narrator for a YouTube/TikTok recap "
             "channel. Your voice is tense, gripping and cinematic — you tell the story to a "
             "viewer who cannot look away. Rewrite every numbered line below as natural, "
             "spoken, dramatic English — not a translation, not a news article. "
-            + _tail(
-                script="use ONLY English (Latin script), no Chinese letters.",
-                accent=("Speak tense, gripping, everyday English — like a movie trailer "
-                        "narrator telling the story to a friend. Use contractions and put a "
-                        "comma at every natural breath point."),
-                story=_STORY_EN)
+            + _tail(script="use ONLY English (Latin script), no Chinese letters.",
+                    accent=("Speak tense, gripping, everyday English — like a movie trailer "
+                            "narrator telling the story to a friend. Use contractions and put a "
+                            "comma at every natural breath point."),
+                    story=_STORY_EN)
         ),
         "chunk_note": (
             _RECAP_NOTE +
@@ -446,8 +426,8 @@ class Settings:
     crop_r: float = 0.0
     crop_b: float = 0.0
     aspect: str = "free"
-    flip: bool = True          # legacy: -1 => never mirror, 0 => constant mirror
-    mirror_every: float = 0.0  # NEW: seconds per mirror flip (0 = use flip only)
+    flip: bool = True
+    mirror_every: float = 0.0
     zoom: float = 1.0
     render_workers: int = 0
     sub: bool = True
@@ -480,11 +460,6 @@ class Settings:
         return f"{self.resolved_rate():+d}%"
 
     def mirror_phase(self, t):
-        """Return True if the frame at time `t` should be mirrored.
-        - mirror_every > 0: flip every `mirror_every` seconds (alternate on/off)
-        - mirror_every == 0: use flip as constant (legacy)
-        - mirror_every < 0: never mirror
-        """
         if self.mirror_every < 0:
             return False
         if self.mirror_every == 0:
@@ -598,7 +573,6 @@ def find_font(lang="my", explicit=""):
     if conf["is_mm"] and env_font and os.path.exists(env_font):
         return env_font
     repo = _globs(REPO_ROOT) + _globs(os.getcwd())
-
     if conf["is_mm"]:
         for name in ("MyanmarPadaung.ttf", "fonts/MyanmarPadaung.ttf"):
             p = os.path.join(REPO_ROOT, name)
@@ -614,7 +588,6 @@ def find_font(lang="my", explicit=""):
             for f in _prefer_regular(repo):
                 if key in os.path.basename(f).lower():
                     return f
-
     sysf = []
     for ext in ("ttf", "otf", "ttc"):
         sysf += glob.glob(f"/usr/share/fonts/**/*.{ext}", recursive=True)
@@ -734,7 +707,6 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
     bh = min(SUB_LINES * lh_box + 2 * pad_y, H)
     max_y = max(0, H - bh)
     box_y = max(0, min(int(pos_y / 100 * max_y), max_y))
-
     cur_fs = fs
     font = get_font(font_path, cur_fs, layout)
     lines = wrap_text(text, font, bw - 2 * pad_x, is_mm)
@@ -744,12 +716,10 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
         lines = wrap_text(text, font, bw - 2 * pad_x, is_mm)
     if not lines:
         return None
-
     radius = max(4, int(fs * 0.30))
     m = Image.new("L", (bw, bh), 0)
     ImageDraw.Draw(m).rounded_rectangle([0, 0, bw - 1, bh - 1], radius=radius, fill=255)
     mask = cv2.GaussianBlur(np.array(m).astype(np.float32) / 255.0, (0, 0), 0.8)
-
     inner = Image.new("L", (bw, bh), 0)
     ImageDraw.Draw(inner).rounded_rectangle([2, 2, bw - 3, bh - 3],
                                             radius=max(2, radius - 2), fill=255)
@@ -757,7 +727,6 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
     grad = np.linspace(1.0, 0.25, bh, dtype=np.float32)[:, None]
     edge = np.clip(mask - inner, 0.0, 1.0) * grad * 0.40
     sheen = (np.linspace(16.0, 0.0, bh, dtype=np.float32))[:, None, None]
-
     img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     ink_img = Image.new("L", (bw, bh), 0)
@@ -775,12 +744,10 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
         d.text((lx, ty), ln, font=font, fill=ink)
         di.text((lx, ty), ln, font=font, fill=255)
         ty += lh
-
     arr = np.array(img)
     a = arr[:, :, 3:4].astype(np.float32) / 255.0
     bgr = arr[:, :, [2, 1, 0]].astype(np.float32)
     tm = (np.array(ink_img).astype(np.float32) / 255.0)[:, :, None]
-
     return {"y0": box_y, "y1": box_y + bh, "x0": mx, "x1": mx + bw,
             "mask": mask[:, :, None], "edge": edge[:, :, None], "sheen": sheen,
             "tint_a": max(0.0, min(float(alpha) / 255.0, 1.0)),
@@ -976,8 +943,7 @@ def _dl_rednote(url, out, progress=None):
     r.raise_for_status()
     urls = _red_video_urls(r.text)
     if not urls:
-        raise RuntimeError("Rednote page ထဲမှာ video URL မတွေ့ပါ (ပုံချည်းပါတဲ့ note ဖြစ်နိုင် / "
-                           "login လိုနေနိုင် / IP ပိတ်ခံရနိုင်)")
+        raise RuntimeError("Rednote page ထဲမှာ video URL မတွေ့ပါ")
     last = None
     for u in urls[:6]:
         try:
@@ -1002,12 +968,8 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
                    f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b"),
         "outtmpl": out_noext + ".%(ext)s",
         "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "retries": 5,
-        "fragment_retries": 5,
-        "concurrent_fragment_downloads": 4,
+        "noplaylist": True, "quiet": True, "no_warnings": True,
+        "retries": 5, "fragment_retries": 5, "concurrent_fragment_downloads": 4,
         "progress_hooks": [hook],
     }
     if cookies_file and os.path.exists(cookies_file):
@@ -1028,7 +990,7 @@ def ensure_mp4(raw, final, height):
     except Exception:
         codec = ""
     if not codec:
-        raise RuntimeError("Video stream မတွေ့ပါ (ဖိုင်က video မဟုတ်နိုင်)")
+        raise RuntimeError("Video stream မတွေ့ပါ")
     if codec == "h264":
         try:
             sh(["ffmpeg", "-y", "-i", raw, "-c", "copy", "-movflags", "+faststart", final])
@@ -1065,8 +1027,7 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
                 errs.append(f"{m}: {str(ex)[:300]}")
                 raw = None
         if not raw:
-            raise RuntimeError("Link ကနေ မဆွဲနိုင်ပါ (YouTube / TikTok / Rednote ပဲ ထောက်ပံ့တယ်)\n"
-                               + "\n".join(errs))
+            raise RuntimeError("Link ကနေ မဆွဲနိုင်ပါ\n" + "\n".join(errs))
         if progress:
             progress(1.0)
         ensure_mp4(raw, final, height)
@@ -1129,19 +1090,15 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
     progress = progress or (lambda f, l=None: None)
     vdur = probe_duration(video)
     if max_min and vdur > max_min * 60:
-        raise RuntimeError(f"Video က {vdur / 60:.1f} မိနစ်ရှိတယ်။ --max-min {max_min} ထက် ကျော်နေတယ် "
-                           "(--max-min တိုးပါ၊ 0 = ကန့်သတ်မရှိ)")
-
+        raise RuntimeError(f"Video က {vdur / 60:.1f} မိနစ်ရှိတယ်။ --max-min ကျော်နေတယ်")
     progress(0.0, "Audio ထုတ်နေတယ်")
     wav = os.path.join(workdir, "audio16k.wav")
     sh(["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
         "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
     with wave.open(wav) as wf:
         audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
-
-    progress(0.08, "Whisper model ဖွင့်နေတယ် (ပထမအကြိမ် download ကြာမယ်)")
+    progress(0.08, "Whisper model ဖွင့်နေတယ်")
     wm = get_model(model_size)
-
     lang = None if src_lang == "auto" else src_lang
     progress(0.15, "Whisper စာသားပြောင်းနေတယ်")
     raw, info = _run(wm, audio, lang, fast, vdur,
@@ -1249,11 +1206,6 @@ def prepare_video(src, dst, target_h, crop=True):
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
-    """Parallel render with per-5s mirror support.
-
-    Mirror alternates ON/OFF every `s.mirror_every` seconds (in OUTPUT timeline).
-    Render chunks are aligned to the mirror boundary so no chunk spans a flip point.
-    """
     cap = cv2.VideoCapture(src)
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1270,26 +1222,21 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
     seg_len = mirror_every if mirror_every > 0 else 0.0
-
     fps_out = int(s.fps)
     nfr = max(1, int(round(total * fps_out)))
     fs = max(16, int(W * s.sub_size / 100))
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
 
     def mirror_at(t):
-        """True = mirrored frame."""
         if mirror_every < 0:
             return False
         if mirror_every == 0:
             return legacy_flip
-        # alternate: [0..T) mirrored, [T..2T) not, ...
         return (int(t // mirror_every) % 2 == 0)
 
     cpu = os.cpu_count() or 2
     target_workers = int(s.render_workers) if int(s.render_workers) > 0 else min(cpu, 6)
     target_workers = max(1, target_workers)
-
-    # Build chunk frame edges; snap to mirror boundaries so every chunk is uniform flip state
     raw_edges = [int(round(nfr * i / target_workers)) for i in range(target_workers + 1)]
     if seg_len > 0:
         boundaries_fr = {0, nfr}
@@ -1299,12 +1246,10 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
             k += 1
         merged = set(raw_edges) | boundaries_fr
         edges = sorted(merged)
-        # drop tiny chunks (< 1s) to avoid overhead
         min_frames = fps_out
         edges = [e for i, e in enumerate(edges)
                  if i == 0 or i == len(edges) - 1 or (e - edges[i - 1]) >= min_frames
                  or (edges[i + 1] - e) >= min_frames or (e - edges[i - 1]) < min_frames]
-        # ensure strictly increasing and dedup
         edges = sorted(set(edges))
     else:
         edges = raw_edges
@@ -1322,7 +1267,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         cap_ = cv2.VideoCapture(src)
         q = queue.Queue(maxsize=48)
         lstop = threading.Event()
-        # mirror state is constant within the chunk (chunk boundaries align to seg_len)
         chunk_mirror = mirror_at(j0 / fps_out)
 
         def put(x):
@@ -1387,7 +1331,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                                 stderr=log_fh)
         th = threading.Thread(target=producer, daemon=True)
         th.start()
-
         t_start = j0 / fps_out
         k, cur_k, cur_ov, j = 0, -1, None, j0
         try:
@@ -1447,7 +1390,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
             with open(log_path, "rb") as f:
                 tail = f.read()[-800:].decode("utf-8", "ignore")
             abort.set()
-            raise RuntimeError(f"render chunk {pi}: ffmpeg fail (frames {j - j0}/{j1 - j0})\n" + tail)
+            raise RuntimeError(f"render chunk {pi}: ffmpeg fail\n" + tail)
         try:
             os.remove(log_path)
         except OSError:
@@ -1465,7 +1408,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                     abort.set()
             for f in futs:
                 f.result()
-
         if progress:
             progress(0.96, "Video + အသံ ပေါင်းနေတယ်")
         with open(lst, "w") as fh:
@@ -1563,7 +1505,6 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     t = max(0.0, min(float(t), PREVIEW_SECS))
     base, clip = _preview_frame_at(src, cache_dir, s.height, t)
     bh, bw = base.shape[:2]
-
     auto = None
     if s.crop_mode == "auto":
         if clip not in _PV_AUTO:
@@ -1572,9 +1513,8 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     base_rect = resolve_crop(bw, bh, s, auto)
     W, H = out_size(base_rect, bh)
     rect = zoom_rect(base_rect, s.zoom)
-    mirror = s.mirror_phase(t) if hasattr(s, "mirror_phase") else bool(s.flip)
+    mirror = s.mirror_phase(t)
     fr = apply_view(base, rect, W, H, mirror)
-
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
@@ -1633,7 +1573,7 @@ class Project:
         p = cls(path)
         f = os.path.join(p.path, cls.FILE)
         if not os.path.exists(f):
-            raise FileNotFoundError(f"Project မတွေ့ပါ: {p.path} (recap init နဲ့ အရင်ဆောက်ပါ)")
+            raise FileNotFoundError(f"Project မတွေ့ပါ: {p.path}")
         with open(f, encoding="utf-8") as fh:
             p.data.update(json.load(fh))
         return p
@@ -1723,7 +1663,7 @@ def _synthesize(proj, my_list, s, progress, proxy):
                 break
             except Exception as ex:
                 if attempt == 3:
-                    raise RuntimeError(f"Edge TTS မအောင်မြင်ပါ (စာကြောင်း #{i}): {ex}\n{my_list[i]}")
+                    raise RuntimeError(f"Edge TTS မအောင်မြင်ပါ (#{i}): {ex}\n{my_list[i]}")
                 time.sleep(1.5)
         sh(["ffmpeg", "-y", "-i", raw_audio, "-af", trim_filter,
             "-ar", "44100", "-ac", "1", wav])
@@ -1806,46 +1746,37 @@ def run_render(proj, s, proxy=None, progress=None):
     conf = LANG_CONF[lang]
     units = proj.units
     if not units:
-        raise RuntimeError("units မရှိသေးပါ — recap transcribe အရင်လုပ်ပါ")
+        raise RuntimeError("units မရှိသေးပါ")
     my_list = [clean_text(u["my"], lang) for u in units]
     empty = [i for i, t in enumerate(my_list) if not t.strip()]
     if empty:
-        raise RuntimeError(f"စာသား မဖြည့်ရသေးတဲ့ စာကြောင်း: {empty[:20]}"
-                           " — recap apply နဲ့ translated.txt ကို အရင်ဖြည့်ပါ")
-
+        raise RuntimeError(f"စာသား မဖြည့်ရသေးတဲ့ စာကြောင်း: {empty[:20]}")
     font = ""
     if s.sub:
         font = find_font(lang, s.font)
         if not font:
-            log(f"⚠️ {conf['label']} font မတွေ့ပါ — စာတန်းမပါဘဲ render လုပ်မယ် (--font သို့ fonts/ ထဲ ထည့်ပါ)")
+            log(f"⚠️ {conf['label']} font မတွေ့ပါ — စာတန်းမပါဘဲ render လုပ်မယ်")
         elif conf["is_mm"] and not has_raqm():
             log("⚠️ libraqm မရှိလို့ မြန်မာစာ ပုံစံ မမှန်နိုင်ပါ (apt install libraqm0)")
-
     T = {}
     t_all = time.time()
-
     t_a = time.time()
     durs = _synthesize(proj, my_list, s, progress.sub(0.0, 0.3), proxy)
     T["TTS"] = time.time() - t_a
-
     t_a = time.time()
     allwav = _concat_audio(proj.path, len(units))
     T["audio concat"] = time.time() - t_a
-
     vdur = proj.data["vdur"]
     plan, total = _build_plan(units, durs, vdur, s.max_speed)
     subs = _build_subs(my_list, durs, lang) if (s.sub and font) else []
-
     t_a = time.time()
     mixed = mix_audio(allwav, proj.path, s, total)
     T["audio mix"] = time.time() - t_a
-
     t_a = time.time()
     render_final(proj.video, mixed, proj.final, plan, total, s, subs, font,
                  is_mm=conf["is_mm"], progress=progress.sub(0.3, 1.0))
     T["render"] = time.time() - t_a
     T["total (stage 2)"] = time.time() - t_all
-
     proj.data["timings"].update({f"stage2 {k}": v for k, v in T.items()})
     proj.update_settings(s)
     proj.save()
@@ -1864,57 +1795,49 @@ def _crop_box(v):
         assert len(parts) == 4
         return tuple(parts)
     except Exception:
-        raise argparse.ArgumentTypeError("--crop-box L,T,R,B (percent trimmed from each side) e.g. 0,10,0,20")
+        raise argparse.ArgumentTypeError("--crop-box L,T,R,B (percent)")
 
 
 def add_style_args(p):
     g = p.add_argument_group("voice / language")
     g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en")
-    g.add_argument("--voice", default=SUP, help="Edge voice name (e.g. my-MM-NilarNeural)")
-    g.add_argument("--rate", type=int, default=SUP,
-                   help="Edge speed %% (-50..100) · default: my 45 / de 10 / en 5")
-    g.add_argument("--workers", dest="tts_workers", type=int, default=SUP, help="parallel TTS jobs")
+    g.add_argument("--voice", default=SUP)
+    g.add_argument("--rate", type=int, default=SUP)
+    g.add_argument("--workers", dest="tts_workers", type=int, default=SUP)
     g = p.add_argument_group("audio mix")
-    g.add_argument("--loud", dest="loud_lufs", type=float, default=SUP,
-                   help="voice loudness LUFS (default -14, ပိုကျယ်ချင်ရင် -12)")
-    g.add_argument("--voice-db", type=float, default=SUP, help="voice extra gain dB (default 0)")
+    g.add_argument("--loud", dest="loud_lufs", type=float, default=SUP)
+    g.add_argument("--voice-db", type=float, default=SUP)
     g = p.add_argument_group("video")
     g.add_argument("--height", type=int, choices=[360, 480, 720, 1080], default=SUP)
     g.add_argument("--fps", type=int, choices=[20, 24, 25, 30], default=SUP)
     g.add_argument("--preset", choices=["ultrafast", "superfast", "veryfast"], default=SUP)
-    g.add_argument("--max-speed", type=float, default=SUP, help="max video speed-up (1.0-2.0)")
-    g.add_argument("--zoom", type=float, default=SUP, help="1.0-1.25")
-    g.add_argument("--render-workers", type=int, default=SUP,
-                   help="parallel render chunks (0 = auto)")
+    g.add_argument("--max-speed", type=float, default=SUP)
+    g.add_argument("--zoom", type=float, default=SUP)
+    g.add_argument("--render-workers", type=int, default=SUP)
     g.add_argument("--mirror-every", type=float, default=SUP,
-                   help="Mirror ကို ဘယ်နှစ်စက္ကန့်တစ်ခါ လှန်မလဲ (ဥပမာ 5) · 0 = အမြဲ · -1 = မလုပ်ဘူး")
-    g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP,
-                   help="mirror ကို လုံးဝ မလုပ်ဘူး (mirror-every=0 ဖြစ်နေရင် အသုံးဝင်တယ်)")
+                   help="Mirror ကို ဘယ်နှစ်စက္ကန့်တစ်ခါ လှန်မလဲ · 0 = အမြဲ · -1 = မလုပ်ဘူး")
+    g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP)
     g = p.add_argument_group("crop")
     g.add_argument("--crop-mode", dest="crop_mode", choices=["auto", "none", "custom"],
-                   default=SUP, help="auto = black-bar detect · custom = --crop-box")
+                   default=SUP)
     g.add_argument("--no-crop", dest="crop_mode", action="store_const", const="none",
-                   default=SUP, help="crop မလုပ်ဘူး")
-    g.add_argument("--crop-box", type=_crop_box, default=SUP,
-                   help="custom crop: L,T,R,B percent trimmed from each side (sets --crop-mode custom)")
-    g.add_argument("--aspect", choices=list(ASPECTS), default=SUP,
-                   help="force aspect ratio for custom crop (free | 9:16 | 1:1 | 4:5 | 3:4 | 16:9 | 4:3)")
+                   default=SUP)
+    g.add_argument("--crop-box", type=_crop_box, default=SUP)
+    g.add_argument("--aspect", choices=list(ASPECTS), default=SUP)
     g = p.add_argument_group("subtitles")
     g.add_argument("--no-sub", dest="sub", action="store_false", default=SUP)
-    g.add_argument("--no-sweep", dest="sub_sweep", action="store_false", default=SUP,
-                   help="စာတန်း music sweep မထည့်ဘူး")
-    g.add_argument("--sub-size", type=float, default=SUP, help="%% of width (3-12)")
-    g.add_argument("--sub-pos", type=int, default=SUP, help="0=top 100=bottom")
-    g.add_argument("--font", default=SUP, help="font file path")
+    g.add_argument("--no-sweep", dest="sub_sweep", action="store_false", default=SUP)
+    g.add_argument("--sub-size", type=float, default=SUP)
+    g.add_argument("--sub-pos", type=int, default=SUP)
+    g.add_argument("--font", default=SUP)
 
 
 def add_whisper_args(p):
     g = p.add_argument_group("whisper")
     g.add_argument("--model", choices=["tiny", "base", "small"], default="base")
-    g.add_argument("--src-lang", default="auto", help="auto | en | zh | ko | ja | hi | th | vi | id")
-    g.add_argument("--no-batch", action="store_true", help="whisper batch mode ပိတ်")
-    g.add_argument("--max-min", type=int, default=0,
-                   help="video အရှည် ကန့်သတ် (မိနစ်) · 0 = ကန့်သတ်မရှိ")
+    g.add_argument("--src-lang", default="auto")
+    g.add_argument("--no-batch", action="store_true")
+    g.add_argument("--max-min", type=int, default=0)
 
 
 def settings_for(proj, args):
@@ -1948,7 +1871,7 @@ def settings_for(proj, args):
     if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
-            log(f"⚠️ voice '{s.voice}' က {s.lang} စာရင်းထဲမှာ မပါဘူး — default သုံးမယ်။ ရနိုင်တာ: {', '.join(valid)}")
+            log(f"⚠️ voice '{s.voice}' က {s.lang} စာရင်းထဲမှာ မပါဘူး — default သုံးမယ်")
             s.voice = ""
     return s
 
@@ -1973,8 +1896,7 @@ def cmd_transcribe(args, proj=None):
                           lang, prog)
     prog.done()
     nparts = len(build_prompt_chunks(proj.units, lang))
-    print(f"✅ {info}\n   Prompt: {proj.prompt_file}  (+ prompt_part01..{nparts:02d}.txt · {CHUNK} ကြောင်းစီ)")
-    print("   → prompt_partNN.txt ကို Gemini chat တစ်ခုတည်းမှာ အစဉ်လိုက် paste၊ ရလဒ်အကုန်ကို translated.txt ထဲ အစဉ်လိုက်ထည့်ပြီး `apply` လုပ်ပါ")
+    print(f"✅ {info}\n   Prompt: {proj.prompt_file}  (+ prompt_part01..{nparts:02d}.txt)")
     return proj
 
 
@@ -2023,7 +1945,6 @@ def cmd_render(args, proj=None):
     mb = os.path.getsize(out) / 1e6
     print(f"\n✅ ပြီးပြီ: {out}  ({mb:.1f} MB)")
     print(f"   {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s)")
-
     t = {**{"transcribe": proj.data["timings"].get("transcribe", 0)}, **res["timings"]}
     print("⏱️\n" + timing_table({k: v for k, v in t.items() if v}))
 
@@ -2035,7 +1956,7 @@ def cmd_preview(args):
     out = args.output or os.path.join(proj.path, "preview.png")
     make_preview_frame(proj.video, out, s, LANG_CONF[s.lang]["sample"], font,
                        LANG_CONF[s.lang]["is_mm"], getattr(args, "at", 0.0) or 0.0)
-    print(f"✅ {out}\n   crop guide: {out[:-4]}_guide.png")
+    print(f"✅ {out}")
 
 
 def cmd_run(args):
@@ -2050,17 +1971,14 @@ def cmd_run(args):
     else:
         log("• units ရှိပြီးသား၊ whisper ကျော်မယ်")
         write_prompt(proj, s.lang)
-
     src = args.translated or proj.translated_file
     if not os.path.exists(src):
-        print(f"\n📋 Prompt: {proj.prompt_file}  (အပိုင်းခွဲ: prompt_partNN.txt)")
-        print(f"   ① prompt_partNN.txt ကို Gemini chat တစ်ခုတည်းမှာ အစဉ်လိုက် paste  ② ရလဒ်အကုန်ကို {src} မှာ အစဉ်လိုက် သိမ်း")
+        print(f"\n📋 Prompt: {proj.prompt_file}")
         if not sys.stdin.isatty():
-            sys.exit(f"\n⏸️ translated ဖိုင်မရှိလို့ ရပ်လိုက်တယ်။ ဖြည့်ပြီးရင် `run ... --translated {src}` "
-                     "(သို့) `apply` + `render` လုပ်ပါ")
+            sys.exit(f"\n⏸️ translated ဖိုင်မရှိလို့ ရပ်လိုက်တယ်")
         input("   ③ ပြီးရင် Enter နှိပ်ပါ ▶ ")
     if not cmd_apply(args, proj, src):
-        sys.exit("❌ စာကြောင်း မပြည့်သေးပါ — translated ဖိုင်ကို စစ်ပြီး ပြန် run ပါ (cache ရှိလို့ မြန်မယ်)")
+        sys.exit("❌ စာကြောင်း မပြည့်သေးပါ")
     cmd_render(args, proj)
 
 
@@ -2069,62 +1987,29 @@ def cmd_ui(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(
-        prog="recap.py",
-        description="Recap video dubber: Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render")
+    p = argparse.ArgumentParser(prog="recap.py",
+                                description="Recap video dubber")
     p.add_argument("--version", action="version", version=f"recap-cli {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    a = sub.add_parser("init", help="video link/ဖိုင်ကို project ထဲ ထည့်")
-    a.add_argument("source", help="YouTube / TikTok / Rednote URL or local file")
-    a.add_argument("-d", "--dir", required=True, help="project folder")
-    a.add_argument("--height", type=int, default=720)
-    a.add_argument("--cookies", help="yt-dlp cookies.txt (သို့) env YT_COOKIES")
+    a = sub.add_parser("init"); a.add_argument("source"); a.add_argument("-d", "--dir", required=True)
+    a.add_argument("--height", type=int, default=720); a.add_argument("--cookies")
     a.set_defaults(fn=cmd_init)
-
-    a = sub.add_parser("transcribe", help="Whisper စာသားထုတ် + prompt.txt")
-    a.add_argument("dir")
-    a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de | en")
-    add_whisper_args(a)
+    a = sub.add_parser("transcribe"); a.add_argument("dir")
+    a.add_argument("--lang", type=resolve_lang, default=None); add_whisper_args(a)
     a.set_defaults(fn=cmd_transcribe)
-
-    a = sub.add_parser("prompt", help="Gemini prompt ပြန်ထုတ် (ဘာသာစကားပြောင်းချင်ရင်)")
-    a.add_argument("dir")
-    a.add_argument("--lang", type=resolve_lang, default=None)
-    a.add_argument("--print", action="store_true")
+    a = sub.add_parser("prompt"); a.add_argument("dir")
+    a.add_argument("--lang", type=resolve_lang, default=None); a.add_argument("--print", action="store_true")
     a.set_defaults(fn=cmd_prompt)
-
-    a = sub.add_parser("apply", help="Gemini ရလဒ် ([0] ... [1] ...) ကို ဖြည့်")
-    a.add_argument("dir")
-    a.add_argument("file", nargs="?", help="default: <dir>/translated.txt  ( - = stdin )")
-    a.add_argument("--lang", type=resolve_lang, default=None)
-    a.set_defaults(fn=cmd_apply)
-
-    a = sub.add_parser("render", help="အသံထုတ် + Video ပေါင်း")
-    a.add_argument("dir")
-    a.add_argument("-o", "--output", help="final mp4 ကို ဒီနေရာ copy")
-    add_style_args(a)
-    a.set_defaults(fn=cmd_render)
-
-    a = sub.add_parser("preview", help="စာတန်း style / crop စစ်ဖို့ ပုံတစ်ပုံ (+ _guide.png)")
-    a.add_argument("dir")
-    a.add_argument("-o", "--output")
-    a.add_argument("--at", type=float, default=0.0, help="preview time (0-5 seconds)")
-    add_style_args(a)
-    a.set_defaults(fn=cmd_preview)
-
-    a = sub.add_parser("run", help="အစအဆုံး (translation မှာ တစ်ခါ ရပ်မယ်)")
-    a.add_argument("source")
-    a.add_argument("-d", "--dir", help="project folder (default work/recap)")
-    a.add_argument("--translated", help="Gemini ရလဒ် ဖိုင် (ရှိပြီးသားဆိုရင် မရပ်ဘူး)")
-    a.add_argument("-o", "--output")
-    a.add_argument("--cookies")
-    add_whisper_args(a)
-    add_style_args(a)
-    a.set_defaults(fn=cmd_run)
-
-    a = sub.add_parser("ui", help="Gradio web UI (dark mode)")
-    a.set_defaults(fn=cmd_ui)
+    a = sub.add_parser("apply"); a.add_argument("dir"); a.add_argument("file", nargs="?")
+    a.add_argument("--lang", type=resolve_lang, default=None); a.set_defaults(fn=cmd_apply)
+    a = sub.add_parser("render"); a.add_argument("dir"); a.add_argument("-o", "--output")
+    add_style_args(a); a.set_defaults(fn=cmd_render)
+    a = sub.add_parser("preview"); a.add_argument("dir"); a.add_argument("-o", "--output")
+    a.add_argument("--at", type=float, default=0.0); add_style_args(a); a.set_defaults(fn=cmd_preview)
+    a = sub.add_parser("run"); a.add_argument("source"); a.add_argument("-d", "--dir")
+    a.add_argument("--translated"); a.add_argument("-o", "--output"); a.add_argument("--cookies")
+    add_whisper_args(a); add_style_args(a); a.set_defaults(fn=cmd_run)
+    a = sub.add_parser("ui"); a.set_defaults(fn=cmd_ui)
     return p
 
 
@@ -2142,25 +2027,19 @@ def launch_ui():
     def voices_for(code):
         return [v for v, _ in LANG_CONF[code]["edge_voices"]]
 
-    def _path(f):
-        if not f:
-            return ""
-        return f if isinstance(f, str) else getattr(f, "name", "")
-
     def _cb(progress):
         return lambda frac, label=None: progress(frac, desc=label or "")
 
-    def _source(url, upload):
-        # upload widget is hidden but kept for local-file cases in future
-        return _path(upload) or extract_url(url or "")
+    def _source(url):
+        return extract_url(url or "")
 
     def _pbar(frac, width=20):
         frac = max(0.0, min(float(frac), 1.0))
         fill = int(width * frac)
         return "█" * fill + "░" * (width - fill)
 
-    def _ensure_video(url, upload, height, cb):
-        source = _source(url, upload)
+    def _ensure_video(url, height, cb):
+        source = _source(url)
         if not source:
             raise gr.Error("Video link ထည့်ပါ")
         key = source
@@ -2206,8 +2085,8 @@ def launch_ui():
 
     FETCH = {}
 
-    def start_fetch(url, upload, height):
-        if not _source(url, upload):
+    def start_fetch(url, height):
+        if not _source(url):
             raise gr.Error("Video link ထည့်ပါ")
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None,
@@ -2221,7 +2100,7 @@ def launch_ui():
 
         def work():
             try:
-                st["res"] = _ensure_video(url, upload, height, cb)
+                st["res"] = _ensure_video(url, height, cb)
             except BaseException as ex:
                 st["err"] = ex
             finally:
@@ -2230,23 +2109,18 @@ def launch_ui():
         threading.Thread(target=work, daemon=True).start()
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
-    # preview inputs order:
-    #   pdir, lang_name, height, zoom, crop_mode, aspect, crop_l, crop_t, crop_r, crop_b,
-    #   flip, mirror_every, sub, sub_size, sub_pos, sweep, pv_t
-    def _preview(pdir, lang_name, height, zoom, crop_mode, aspect, cl, ct, cr, cb_,
-                 flip, mirror_every, sub, sub_size, sub_pos, sweep, pv_t, strict):
+    # preview args (NO crop)
+    def _preview(pdir, lang_name, height, zoom, flip, mirror_every, sub, sub_size,
+                 sub_pos, sweep, pv_t, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
-            return gr.skip(), gr.skip()
+            return gr.skip()
         code = LANGS[lang_name]
         try:
             proj = Project.load(pdir)
             s = proj.settings
             s.lang, s.height, s.zoom = code, int(height), float(zoom)
-            s.crop_mode = crop_mode if crop_mode in ("auto", "none", "custom") else "auto"
-            s.aspect = aspect if aspect in ASPECTS else "free"
-            s.crop_l, s.crop_t, s.crop_r, s.crop_b = float(cl), float(ct), float(cr), float(cb_)
             s.flip = bool(flip)
             s.mirror_every = float(mirror_every)
             s.sub = bool(sub)
@@ -2260,12 +2134,12 @@ def launch_ui():
             out = os.path.join(pdir, f"preview_{int(time.time() * 1000)}.png")
             make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
                                LANG_CONF[code]["is_mm"], float(pv_t or 0.0))
-            return out, out[:-4] + "_guide.png"
+            return out
         except Exception as ex:
             log(f"preview error: {ex}")
             if strict:
                 raise gr.Error(str(ex)[:400])
-            return gr.skip(), gr.skip()
+            return gr.skip()
 
     def preview_auto(*a):
         return _preview(*a, False)
@@ -2273,27 +2147,27 @@ def launch_ui():
     def poll_fetch(jid, *pv):
         st = FETCH.get(jid) if jid else None
         if st is None:
-            return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
+            return gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
         elapsed = time.time() - st["t0"]
         if not st["done"]:
             if st["f"] >= 1.0:
-                msg = "🔄 MP4 ပြင်ဆင်နေတယ် (ဖိုင်ကြီးရင် ခဏကြာမယ်)"
+                msg = "🔄 MP4 ပြင်ဆင်နေတယ်"
             else:
                 msg = f"⬇️ {st['label']} {int(st['f'] * 100)}%"
-            return gr.skip(), f"{msg} · {elapsed:.0f}s", gr.skip(), gr.skip(), gr.skip()
+            return gr.skip(), f"{msg} · {elapsed:.0f}s", gr.skip(), gr.skip()
         FETCH.pop(jid, None)
         if st["err"] is not None:
-            return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.skip(), gr.Timer(active=False)
+            return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.Timer(active=False)
         pdir, proj = st["res"]
         mb = os.path.getsize(proj.video) / 1e6
-        img, guide = _preview(pdir, *pv, False)
-        return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ Crop / စာတန်း ချိန်ပြီး 1️⃣ နှိပ်ပါ",
-                img, guide, gr.Timer(active=False))
+        img = _preview(pdir, *pv, False)
+        return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ ချိန်ပြီး 1️⃣ နှိပ်ပါ",
+                img, gr.Timer(active=False))
 
     TRANS = {}
 
-    def start_step1(url, upload, lang_name, model, src_lang, max_min, height):
-        if not _source(url, upload):
+    def start_step1(url, lang_name, model, src_lang, max_min, height):
+        if not _source(url):
             raise gr.Error("Video link ထည့်ပါ")
         code = LANGS[lang_name]
         jid = uuid.uuid4().hex[:8]
@@ -2309,7 +2183,7 @@ def launch_ui():
         def work():
             try:
                 cb(0.0, "Video ယူနေတယ်...")
-                pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
+                pdir, proj = _ensure_video(url, height, lambda f, l=None: cb(f * 0.2, l))
                 tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
                 info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
                 st["res"] = (pdir, info, build_prompt_chunks(proj.units, code))
@@ -2341,7 +2215,7 @@ def launch_ui():
 
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               height, fps, preset, max_speed,
-              crop_mode, aspect, cl, ct, cr, cb_, flip, mirror_every, zoom,
+              flip, mirror_every, zoom,
               sub, sub_size, sub_pos, sweep, rworkers,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
@@ -2362,9 +2236,6 @@ def launch_ui():
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.flip, s.zoom = float(max_speed), bool(flip), float(zoom)
             s.mirror_every = float(mirror_every)
-            s.crop_mode = crop_mode if crop_mode in ("auto", "none", "custom") else "auto"
-            s.aspect = aspect if aspect in ASPECTS else "free"
-            s.crop_l, s.crop_t, s.crop_r, s.crop_b = float(cl), float(ct), float(cr), float(cb_)
             s.render_workers = int(rworkers)
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
@@ -2383,14 +2254,13 @@ def launch_ui():
         out = os.path.join(pdir, f"final_{code}_{int(time.time())}.mp4")
         shutil.copy(res["final"], out)
         mb = os.path.getsize(out) / 1e6
-
         return (out, [out],
                 f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB")
 
     def reset_all(pdir):
         if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
             shutil.rmtree(pdir, ignore_errors=True)
-        return "", "", "", [], {}, "", None, None, None, None, "🗑️ ရှင်းပြီး"
+        return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
 
     def make_setter(lo, hi):
         def f(text, parts):
@@ -2428,15 +2298,13 @@ def launch_ui():
             voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="Edge voice")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
-                                 label="Edge speed % (ဘာသာစကားပြောင်းရင် အလိုအလျောက် ချိန်မယ်)")
+                                 label="Edge speed %")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
             lang.change(on_lang_change, lang, [voice, rate])
 
         gr.Markdown("### 📥 Video")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
                          placeholder="https://...")
-        # (upload widget removed — link only)
-        upload = gr.State("")
         b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
         status_fetch = gr.Markdown()
 
@@ -2445,19 +2313,7 @@ def launch_ui():
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
                          label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့်)")
 
-        gr.Markdown("### ✂️ Crop (CapCut လို custom crop)")
-        crop_mode = gr.Radio([("Auto (black bar)", "auto"), ("မဖြတ်ဘူး", "none"),
-                              ("✂️ Custom", "custom")], value="auto", label="Crop mode")
-        guide_img = gr.Image(label="Crop guide — အစိမ်းရောင်ဘောင်ထဲက အပိုင်းကိုပဲ ယူမယ်၊ မှောင်နေတာ ဖြတ်ထုတ်မယ်",
-                             type="filepath", interactive=False)
-        aspect = gr.Dropdown(list(ASPECTS), value="free",
-                             label="Aspect ratio (Custom မှာသာ — free = အလိုအတိုင်း)")
-        with gr.Row():
-            crop_l = gr.Slider(0, 45, value=0, step=0.5, label="ဘယ်ဘက် ဖြတ် %")
-            crop_r = gr.Slider(0, 45, value=0, step=0.5, label="ညာဘက် ဖြတ် %")
-        with gr.Row():
-            crop_t = gr.Slider(0, 45, value=0, step=0.5, label="အပေါ် ဖြတ် %")
-            crop_b = gr.Slider(0, 45, value=0, step=0.5, label="အောက် ဖြတ် %")
+        # ---- (Crop section ဖျက်လိုက်ပါပြီ) ----
 
         with gr.Accordion("🎛️ စာတန်း / Mirror / Render", open=False):
             with gr.Row():
@@ -2472,18 +2328,18 @@ def launch_ui():
             rworkers = gr.Slider(0, 12, value=0, step=1,
                                  label="Render တစ်ပြိုင်နက် (0 = auto · CPU core အလိုက်)")
 
-        pv_in = [pdir_state, lang, height, zoom, crop_mode, aspect, crop_l, crop_t, crop_r,
-                 crop_b, flip, mirror_every, sub, sub_size, sub_pos, sweep, pv_t]
+        # Preview args (NO crop)
+        pv_in = [pdir_state, lang, height, zoom, flip, mirror_every,
+                 sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click):
-            trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
+            trig(start_fetch, [url, height], [fetch_job, status_fetch, fetch_timer])
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
-                         [pdir_state, status_fetch, pv_img, guide_img, fetch_timer],
+                         [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, crop_mode, aspect, crop_l,
-                  crop_t, crop_r, crop_b, lang, pv_t, mirror_every):
-            c.change(preview_auto, pv_in, [pv_img, guide_img],
+        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, pv_t, mirror_every):
+            c.change(preview_auto, pv_in, [pv_img],
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
         gr.Markdown("### 1️⃣ စာသားထုတ်")
@@ -2519,20 +2375,19 @@ def launch_ui():
         dl = gr.File(label="⬇️ Download MP4", file_count="multiple")
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-        b1.click(start_step1, [url, upload, lang, model, src_lang, max_min, height],
+        b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
                  [trans_job, status1, trans_timer, b1])
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          height, fps, preset, max_speed,
-                         crop_mode, aspect, crop_l, crop_t, crop_r, crop_b, flip,
-                         mirror_every, zoom,
+                         flip, mirror_every, zoom,
                          sub, sub_size, sub_pos, sweep, rworkers],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-                  pv_img, guide_img, video, dl, status2])
+                  pv_img, video, dl, status2])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
@@ -2546,7 +2401,7 @@ def main(argv=None):
     try:
         args.fn(args)
     except KeyboardInterrupt:
-        sys.exit("\n⛔ ရပ်လိုက်ပါပြီ (ပြန် run ရင် ပြီးသား အသံတွေ cache ကနေ ယူမယ်)")
+        sys.exit("\n⛔ ရပ်လိုက်ပါပြီ")
     except Exception as ex:
         sys.exit(f"\n❌ {ex}")
 
