@@ -7,7 +7,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.13.0"  # Blur Box version
+__version__ = "1.14.0"  # Glass Blur Box version
 
 import argparse
 import asyncio
@@ -381,7 +381,7 @@ class Settings:
     sub_size: float = 7.0
     sub_pos: int = 90
     sub_alpha: int = 204
-    sub_color: str = "0,0,0"     # 0,0,0 = black tint, 255,255,255 = white tint
+    sub_color: str = "0,0,0"     # Box tint color
     sub_sweep: bool = True
     font: str = ""
     neon: bool = True
@@ -596,7 +596,7 @@ SWEEP_BAND = np.array([255, 255, 235], np.float32)
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 255),
                   layout="raqm", is_mm=True, box_rgb=(0, 0, 0)):
-    """Builds the subtitle overlay with a blurred glass box."""
+    """Builds the subtitle overlay with a glass box mask."""
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     ink_img = Image.new("L", (W, H), 0)
@@ -618,24 +618,24 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     if not lines:
         return None
 
-    # 🟢 Blur Glass Box
+    # 🟢 Glass Box Mask
     if alpha > 0:
-        # အနားသတ်လုံးဝန်း အကွက်ဆွဲခြင်း
-        blur_img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        bd = ImageDraw.Draw(blur_img)
+        mask = Image.new("L", (W, H), 0)
+        md = ImageDraw.Draw(mask)
+        md.rounded_rectangle([0, box_y, W, box_y + box_h], 
+                             radius=int(fs * 0.66), fill=255)
+        
+        # အစွန်းတွေ ချောမွေ့သွားအောင် နည်းနည်းဝါးပေးခြင်း
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=int(fs * 0.1)))
+        
+        # အနည်းငယ် အရောင်ထည့်ခြင်း (အကြည်ရောင် Glass effect)
         rgb = tuple(int(max(0, min(255, int(x)))) for x in (box_rgb or (0, 0, 0)))[:3]
+        tint = Image.new("RGBA", (W, H), (rgb[0], rgb[1], rgb[2], int(alpha)))
+        img.paste(tint, (0, 0), mask)
         
-        bd.rounded_rectangle([0, box_y, W, box_y + box_h], 
-                             radius=int(fs * 0.66),
-                             fill=(rgb[0], rgb[1], rgb[2], int(alpha)))
+        # နောက်ခံ Video ကို မှုန်ဝါးစေဖို့ Mask ကို သိမ်းထားမယ်
+        img.glass_mask = mask
         
-        # Box တစ်ခုလုံးကို မှုန်ဝါးစေခြင်း
-        blurred_box = blur_img.filter(ImageFilter.GaussianBlur(radius=int(fs * 0.3)))
-        
-        # မူလပုံပေါ် ထပ်ပေါင်းခြင်း
-        img.alpha_composite(blurred_box)
-        
-        # စာသားပြန်ရေးဖို့ Draw ကို Refresh လုပ်ခြင်း
         d = ImageDraw.Draw(img)
 
     ink = (int(color[0]), int(color[1]), int(color[2]), 255)
@@ -660,9 +660,23 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=204, color=(255, 255, 
     bgr = crop[:, :, [2, 1, 0]].astype(np.float32)
     tm = (np.array(ink_img)[y0:y1].astype(np.float32) / 255.0)[:, :, None]
     return {"y0": y0, "y1": y1, "inv": 1.0 - a, "pre": bgr * a,
-            "tm": tm, "xs": np.arange(W, dtype=np.float32)[None, :, None]}
+            "tm": tm, "xs": np.arange(W, dtype=np.float32)[None, :, None],
+            "glass_mask": getattr(img, "glass_mask", None)}
 
 def blend_overlay(fr, ov, p=None):
+    # ၁။ နောက်ခံကို မှုန်ဝါးစေမယ့် Glass effect
+    if ov.get("glass_mask") is not None:
+        y0, y1 = ov["y0"], ov["y1"]
+        region = fr[y0:y1]
+        
+        # Blur လုပ်မယ်
+        blurred = cv2.GaussianBlur(region, (0, 0), sigmaX=12)
+        
+        # Mask ကို သုံးပြီး မှုန်ဝါးတဲ့အပိုင်းကို သီးသန့်ဖြတ်ထုတ်မယ်
+        mask = np.array(ov["glass_mask"])[y0:y1, :, None].astype(np.float32) / 255.0
+        fr[y0:y1] = (region * (1 - mask) + blurred * mask).astype(np.uint8)
+
+    # ၂။ စာသားနဲ့ Sweep effect ကို ထပ်ပေါင်းမယ်
     reg = fr[ov["y0"]:ov["y1"]].astype(np.float32) * ov["inv"] + ov["pre"]
     if p is not None:
         W = reg.shape[1]
