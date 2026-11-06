@@ -5,9 +5,10 @@ Languages: Burmese (my) / German (de) / English (en)   ·   Sources: YouTube / T
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang de
        python recap.py run <video|url> -d work/ep1 --lang en
+       python recap.py run <video|url> -d work/ep1 --lang en --crop-mode custom --crop-box 0,10,0,20 --aspect 9:16
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.17.0"
+__version__ = "1.18.0"
 
 import argparse
 import asyncio
@@ -43,10 +44,21 @@ SUB_LINES = 2                    # subtitle box always has this many text lines
 PREVIEW_SECS = 5.0               # preview scrub range (seconds)
 CHUNK = 100                      # lines per Gemini prompt part
 
+# Crop aspect presets (width / height). "free" = no forced ratio.
+ASPECTS = {"free": None, "9:16": 9 / 16, "1:1": 1.0, "4:5": 4 / 5,
+           "3:4": 3 / 4, "16:9": 16 / 9, "4:3": 4 / 3}
+
 # Default trim (Burmese / German) — silence trim + 0.2s pad
 TRIM = (
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,apad=pad_dur=0.2"
+)
+
+# English trim — GAPLESS: stronger silence threshold (-42dB) so the TTS lead-in / tail
+# silence is cut hard, keeps only 30ms, and NO apad → lines flow into each other.
+TRIM_EN = (
+    "silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.03,areverse,"
+    "silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.03,areverse"
 )
 
 # ----------------------------------------------------------------------
@@ -334,12 +346,6 @@ def _tail(script, accent, story):
     )
 
 
-# English trim — no apad, so line gaps are ~0.3–0.5s instead of 0.5–0.8s
-TRIM_EN = (
-    "silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
-    "silenceremove=start_periods=1:start_threshold=-50dB,areverse"
-)
-
 LANG_CONF = {
     "my": {
         "name": "Burmese",
@@ -415,7 +421,7 @@ LANG_CONF = {
         "label": "အင်္ဂလိပ်",
         "sample": "This is a sample subtitle line.",
         "rate": 5,
-        "trim": TRIM_EN,   # ← English သာ — apad မပါ (0.3–0.5s gaps)
+        "trim": TRIM_EN,   # English only — gapless (hard silence trim, no apad)
         "edge_voices": [
             ("en-US-AriaNeural", "Aria (female, US)"),
             ("en-US-GuyNeural", "Guy (male, US)"),
@@ -478,9 +484,16 @@ class Settings:
     fps: int = 24
     preset: str = "ultrafast"
     max_speed: float = 1.25
-    crop: bool = True
+    # crop: "auto" (black-bar detect) | "none" | "custom" (CapCut-style box)
+    crop_mode: str = "auto"
+    crop_l: float = 0.0      # % trimmed from the left
+    crop_t: float = 0.0      # % trimmed from the top
+    crop_r: float = 0.0      # % trimmed from the right
+    crop_b: float = 0.0      # % trimmed from the bottom
+    aspect: str = "free"     # free | 9:16 | 1:1 | 4:5 | 3:4 | 16:9 | 4:3
     flip: bool = True
     zoom: float = 1.0
+    render_workers: int = 0  # parallel render chunks (0 = auto)
     sub: bool = True
     sub_size: float = 7.0
     sub_pos: int = 90
@@ -493,8 +506,12 @@ class Settings:
 
     @classmethod
     def from_dict(cls, d):
+        d = dict(d or {})
+        # backward compat: old projects had a boolean `crop`
+        if "crop" in d and "crop_mode" not in d:
+            d["crop_mode"] = "auto" if d["crop"] else "none"
         names = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in (d or {}).items() if k in names})
+        return cls(**{k: v for k, v in d.items() if k in names})
 
     def resolved_voice(self):
         return self.voice or LANG_CONF[self.lang]["edge_voices"][0][0]
@@ -805,10 +822,17 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
             "xs": np.arange(bw, dtype=np.float32)[None, :, None]}
 
 
+_BLUR_DOWN = 4   # glass blur is computed at 1/4 resolution (much faster, looks the same)
+
+
 def blend_overlay(fr, ov, p=None):
     y0, y1, x0, x1 = ov["y0"], ov["y1"], ov["x0"], ov["x1"]
     base = fr[y0:y1, x0:x1]
-    blur = cv2.GaussianBlur(base, (0, 0), ov["sigma"]).astype(np.float32)
+    h, w = base.shape[:2]
+    sc = _BLUR_DOWN
+    small = cv2.resize(base, (max(1, w // sc), max(1, h // sc)), interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), max(1.0, ov["sigma"] / sc))
+    blur = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
     ta = ov["tint_a"]
     glass = blur * (1.0 - ta) + GLASS_TINT * ta + ov["sheen"]
     reg = base.astype(np.float32) * (1.0 - ov["mask"]) + glass * ov["mask"]
@@ -831,16 +855,77 @@ def blend_overlay(fr, ov, p=None):
     fr[y0:y1, x0:x1] = np.clip(reg, 0, 255).astype(np.uint8)
 
 
-def zoom_flip(fr, zoom, flip):
-    zoomed = zoom > 1.001
-    if zoomed:
-        H, W = fr.shape[:2]
-        cw, ch = int(W / zoom), int(H / zoom)
-        x0, y0 = (W - cw) // 2, (H - ch) // 2
-        fr = cv2.resize(fr[y0:y0 + ch, x0:x0 + cw], (W, H), interpolation=cv2.INTER_LINEAR)
+# ======================================================================
+# crop / zoom / flip (CapCut-style custom crop)
+# ======================================================================
+def resolve_crop(src_w, src_h, s, auto=None):
+    """Return the kept rectangle (x, y, w, h) inside a src_w x src_h frame.
+
+    auto   -> black-bar rectangle from detect_crop() (w, h, x, y) or None
+    custom -> crop_l/t/r/b (% trimmed from each side) + optional aspect ratio
+              (the box is shrunk, centred, to fit the chosen ratio)
+    """
+    full = (0, 0, src_w, src_h)
+    mode = getattr(s, "crop_mode", "auto")
+    if mode == "none":
+        return full
+
+    if mode == "custom":
+        x0 = src_w * s.crop_l / 100.0
+        y0 = src_h * s.crop_t / 100.0
+        x1 = src_w * (1.0 - s.crop_r / 100.0)
+        y1 = src_h * (1.0 - s.crop_b / 100.0)
+        w, h = x1 - x0, y1 - y0
+        if w < 32 or h < 32:
+            return full
+        ar = ASPECTS.get(s.aspect)
+        if ar:
+            if w / h > ar:
+                nw = h * ar
+                x0 += (w - nw) / 2.0
+                w = nw
+            else:
+                nh = w / ar
+                y0 += (h - nh) / 2.0
+                h = nh
+        cx, cy = int(round(x0)) // 2 * 2, int(round(y0)) // 2 * 2
+        cw, ch = max(2, int(w) // 2 * 2), max(2, int(h) // 2 * 2)
+        cw, ch = min(cw, src_w - cx), min(ch, src_h - cy)
+        return (cx, cy, cw, ch)
+
+    # auto
+    if auto and auto[1] < src_h * 0.95 and auto[0] > 0 and auto[1] > 0:
+        cw, ch, cx, cy = auto
+        cw, ch = min(cw, src_w - cx), min(ch, src_h - cy)
+        return (cx, cy, cw, ch)
+    return full
+
+
+def zoom_rect(rect, zoom):
+    x, y, w, h = rect
+    if zoom <= 1.001:
+        return rect
+    nw, nh = max(2, int(w / zoom) // 2 * 2), max(2, int(h / zoom) // 2 * 2)
+    return (x + (w - nw) // 2, y + (h - nh) // 2, nw, nh)
+
+
+def apply_view(fr, rect, W, H, flip, interp=cv2.INTER_LINEAR):
+    """crop + zoom (one rect) -> single resize -> optional mirror. Always returns a new array."""
+    x, y, w, h = rect
+    f = fr[y:y + h, x:x + w]
+    if (w, h) != (W, H):
+        f = cv2.resize(f, (W, H), interpolation=interp)
+    else:
+        f = f.copy()
     if flip:
-        return cv2.flip(fr, 1)
-    return fr if zoomed else fr.copy()
+        f = cv2.flip(f, 1)
+    return f
+
+
+def out_size(rect, height):
+    H = int(height) // 2 * 2
+    W = int(round(rect[2] * H / rect[3] / 2)) * 2
+    return W, H
 
 
 # ======================================================================
@@ -1207,147 +1292,215 @@ def prepare_video(src, dst, target_h, crop=True):
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
+    """Parallel render: the output timeline is split into N chunks, every chunk is
+    rendered by its own thread (own decoder + own ffmpeg encoder), then the chunks are
+    joined with a stream-copy concat and muxed with the audio. Crop + zoom is a single
+    rectangle -> one resize per frame; the mirror flip happens in the producer thread."""
     cap = cv2.VideoCapture(src)
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     sfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     stotal = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 10 ** 9
+    cap.release()
 
-    c = detect_crop(src) if s.crop else None
-    if c and c[1] < src_h * 0.95 and c[0] > 0 and c[1] > 0:
-        cw, ch, cx, cy = c
-        cw, ch = min(cw, src_w - cx), min(ch, src_h - cy)
-    else:
-        cw, ch, cx, cy = src_w, src_h, 0, 0
-    need_crop = (cw, ch) != (src_w, src_h)
-    H = int(s.height) // 2 * 2
-    W = int(round(cw * H / ch / 2)) * 2
-    need_resize = (W, H) != (cw, ch)
-    interp = cv2.INTER_AREA if H < ch else cv2.INTER_LINEAR
+    auto = detect_crop(src) if s.crop_mode == "auto" else None
+    base_rect = resolve_crop(src_w, src_h, s, auto)
+    W, H = out_size(base_rect, s.height)
+    rect = zoom_rect(base_rect, s.zoom)
+    interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
+    flip = bool(s.flip)
 
     fps_out = int(s.fps)
     nfr = max(1, int(round(total * fps_out)))
     fs = max(16, int(W * s.sub_size / 100))
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
 
-    q = queue.Queue(maxsize=32)
-    stop = threading.Event()
+    cpu = os.cpu_count() or 2
+    nw = int(s.render_workers) if int(s.render_workers) > 0 else min(cpu, 6)
+    nw = max(1, min(nw, nfr // max(fps_out * 3, 1) or 1))
+    edges = [int(round(nfr * i / nw)) for i in range(nw + 1)]
+    counts = [0] * nw
+    per_threads = max(1, cpu // nw)
+    wd = os.path.dirname(os.path.abspath(out))
+    tag = uuid.uuid4().hex[:6]
+    parts = [os.path.join(wd, f"_part{tag}_{i:02d}.mp4") for i in range(nw)]
+    abort = threading.Event()
 
-    def put(x):
-        while not stop.is_set():
+    def worker(pi):
+        j0, j1 = edges[pi], edges[pi + 1]
+        cap_ = cv2.VideoCapture(src)
+        q = queue.Queue(maxsize=24)
+        lstop = threading.Event()
+
+        def put(x):
+            while not lstop.is_set() and not abort.is_set():
+                try:
+                    q.put(x, timeout=0.5)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def producer():
+            cur, last = -1, None
+            ui = 0
+            T0 = j0 / fps_out
+            while ui < len(plan) - 1 and T0 >= plan[ui + 1][0]:
+                ui += 1
             try:
-                q.put(x, timeout=0.5)
-                return
-            except queue.Full:
-                continue
-
-    def producer():
-        cur, last, ui = -1, None, 0
-        try:
-            for j in range(nfr):
-                if stop.is_set():
-                    return
-                T = j / fps_out
-                while ui < len(plan) - 1 and T >= plan[ui + 1][0]:
-                    ui += 1
-                cs, _d, s0, spd = plan[ui]
-                idx = min(int((s0 + (T - cs) * spd) * sfps + 0.5), stotal - 1)
-                if idx > cur + 90:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                    cur = idx - 1
-                new = False
-                while cur < idx:
-                    if not cap.grab():
+                for j in range(j0, j1):
+                    if lstop.is_set() or abort.is_set():
+                        return
+                    T = j / fps_out
+                    while ui < len(plan) - 1 and T >= plan[ui + 1][0]:
+                        ui += 1
+                    cs, _d, s0, spd = plan[ui]
+                    idx = min(max(int((s0 + (T - cs) * spd) * sfps + 0.5), 0), stotal - 1)
+                    if idx > cur + 90 or idx < cur:
+                        cap_.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                        cur = idx - 1
+                    new = False
+                    while cur < idx:
+                        if not cap_.grab():
+                            break
+                        cur += 1
+                        new = True
+                    if new:
+                        ok, f = cap_.retrieve()
+                        if ok:
+                            last = apply_view(f, rect, W, H, flip, interp)
+                    if last is None:
+                        return
+                    if not put(last.copy()):
+                        return
+            finally:
+                # the sentinel must always get through unless this worker is shutting down
+                while not lstop.is_set():
+                    try:
+                        q.put(None, timeout=0.5)
                         break
-                    cur += 1
-                    new = True
-                if new:
-                    ok, f = cap.retrieve()
-                    if ok:
-                        if need_crop:
-                            f = f[cy:cy + ch, cx:cx + cw]
-                        if need_resize or f.shape[1] != W or f.shape[0] != H:
-                            f = cv2.resize(f, (W, H), interpolation=interp)
-                        last = f
-                if last is None:
-                    return
-                put(last)
-        finally:
-            put(None)
+                    except queue.Full:
+                        continue
 
-    log_path = out + ".log"
-    log_fh = open(log_path, "wb")
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
-           "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-i", audio,
-           "-map", "0:v", "-map", "1:a:0",
-           "-c:v", "libx264", "-preset", s.preset, "-crf", "27", "-pix_fmt", "yuv420p",
-           "-threads", "0", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-           "-t", f"{total:.3f}", out]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_fh)
-    th = threading.Thread(target=producer, daemon=True)
-    th.start()
+        log_path = parts[pi] + ".log"
+        log_fh = open(log_path, "wb")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
+               "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-an",
+               "-c:v", "libx264", "-preset", s.preset, "-crf", "27", "-pix_fmt", "yuv420p",
+               "-threads", str(per_threads), parts[pi]]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                stderr=log_fh)
+        th = threading.Thread(target=producer, daemon=True)
+        th.start()
 
-    k, cur_k, cur_ov, j = 0, -1, None, 0
-    try:
-        while True:
-            fr = q.get()
-            if fr is None:
-                break
-            t = j / fps_out
-            fr = zoom_flip(fr, s.zoom, s.flip)
-            if subs and font_path:
-                while k < len(subs) and subs[k][1] < t:
-                    k += 1
-                if k < len(subs) and subs[k][0] <= t:
-                    if cur_k != k:
-                        cur_ov = build_overlay(subs[k][2], W, H, font_path, fs, s.sub_pos,
-                                               is_mm=is_mm, **style)
-                        cur_k = k
-                    if cur_ov:
-                        pr = None
-                        if s.sub_sweep:
-                            pr = (t - subs[k][0]) / max(subs[k][1] - subs[k][0], 1e-3)
-                        blend_overlay(fr, cur_ov, pr)
-            proc.stdin.write(fr.data)
-            j += 1
-            if progress and j % 30 == 0:
-                progress(min(j / nfr, 1.0), "Video render")
-    except BrokenPipeError:
-        pass
-    finally:
-        stop.set()
+        t_start = j0 / fps_out
+        k, cur_k, cur_ov, j = 0, -1, None, j0
         try:
             while True:
-                q.get_nowait()
-        except queue.Empty:
+                try:
+                    fr = q.get(timeout=0.5)
+                except queue.Empty:
+                    if abort.is_set():
+                        break
+                    continue
+                if fr is None:
+                    break
+                t = j / fps_out
+                if subs and font_path:
+                    if j == j0:
+                        while k < len(subs) and subs[k][1] < t_start:
+                            k += 1
+                    while k < len(subs) and subs[k][1] < t:
+                        k += 1
+                    if k < len(subs) and subs[k][0] <= t:
+                        if cur_k != k:
+                            cur_ov = build_overlay(subs[k][2], W, H, font_path, fs, s.sub_pos,
+                                                   is_mm=is_mm, **style)
+                            cur_k = k
+                        if cur_ov:
+                            pr = None
+                            if s.sub_sweep:
+                                pr = (t - subs[k][0]) / max(subs[k][1] - subs[k][0], 1e-3)
+                            blend_overlay(fr, cur_ov, pr)
+                proc.stdin.write(fr.data)
+                j += 1
+                counts[pi] = j - j0
+        except BrokenPipeError:
             pass
-        th.join(timeout=5)
-        cap.release()
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
-        try:
-            proc.wait()
-        except Exception:
-            pass
-        log_fh.close()
+        finally:
+            lstop.set()
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+            th.join(timeout=5)
+            cap_.release()
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait()
+            except Exception:
+                pass
+            log_fh.close()
 
-    if proc.returncode != 0:
-        with open(log_path, "rb") as f:
-            tail = f.read()[-800:].decode("utf-8", "ignore")
-        raise RuntimeError("render: ffmpeg fail\n" + tail)
+        if abort.is_set():
+            return
+        if proc.returncode != 0 or j != j1:
+            with open(log_path, "rb") as f:
+                tail = f.read()[-800:].decode("utf-8", "ignore")
+            abort.set()
+            raise RuntimeError(f"render chunk {pi}: ffmpeg fail (frames {j - j0}/{j1 - j0})\n" + tail)
+        try:
+            os.remove(log_path)
+        except OSError:
+            pass
+
+    lst = os.path.join(wd, f"_parts{tag}.txt")
     try:
-        os.remove(log_path)
-    except OSError:
-        pass
+        with ThreadPoolExecutor(max_workers=nw) as pool:
+            futs = [pool.submit(worker, i) for i in range(nw)]
+            while not all(f.done() for f in futs):
+                time.sleep(0.25)
+                if progress:
+                    progress(min(sum(counts) / nfr, 0.97) * 0.95, "Video render")
+                if any(f.done() and f.exception() for f in futs):
+                    abort.set()
+            for f in futs:
+                f.result()
+
+        if progress:
+            progress(0.96, "Video + အသံ ပေါင်းနေတယ်")
+        with open(lst, "w") as fh:
+            for p_ in parts:
+                fh.write(f"file '{p_}'\n")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", lst,
+             "-i", audio, "-map", "0:v", "-map", "1:a:0", "-c:v", "copy",
+             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+             "-t", f"{total:.3f}", out],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError("render: mux fail\n" + r.stderr[-800:])
+    finally:
+        for p_ in parts + [lst]:
+            for f_ in (p_, p_ + ".log"):
+                if os.path.exists(f_):
+                    try:
+                        os.remove(f_)
+                    except OSError:
+                        pass
     if progress:
         progress(1.0, "Video render")
     return out
 
 
 # ---- preview
-def _preview_clip(src, clip_path, height, crop):
+def _preview_clip(src, clip_path, height):
+    """Short clip scaled to `height`, NO crop baked in (crop is applied per frame so the
+    custom-crop sliders update the preview instantly)."""
     if os.path.exists(clip_path) and os.path.getsize(clip_path) > 1000:
         return clip_path
     raw = clip_path + "_raw.mp4"
@@ -1362,7 +1515,7 @@ def _preview_clip(src, clip_path, height, crop):
                 break
         if not os.path.exists(raw) or os.path.getsize(raw) <= 1000:
             raise RuntimeError("preview clip မရပါ")
-        prepare_video(raw, tmp, height, crop)
+        prepare_video(raw, tmp, height, crop=False)
         os.replace(tmp, clip_path)
     finally:
         for f in (raw, tmp):
@@ -1374,9 +1527,9 @@ def _preview_clip(src, clip_path, height, crop):
     return clip_path
 
 
-def _preview_frame_at(src, cache_dir, height, crop, t):
-    key = f"pv_clip_{os.path.getsize(src)}_{int(height)}_{int(bool(crop))}.mp4"
-    clip = _preview_clip(src, os.path.join(cache_dir, key), height, crop)
+def _preview_frame_at(src, cache_dir, height, t):
+    key = f"pv_clip2_{os.path.getsize(src)}_{int(height)}.mp4"
+    clip = _preview_clip(src, os.path.join(cache_dir, key), height)
     cap = cv2.VideoCapture(clip)
     fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
@@ -1394,21 +1547,48 @@ def _preview_frame_at(src, cache_dir, height, crop, t):
     cap.release()
     if fr is None:
         raise RuntimeError("preview frame မရပါ")
-    return fr
+    return fr, clip
+
+
+_PV_AUTO = {}
+
+
+def _guide_image(base, crop_rect, zoomed_rect):
+    """Full frame with the discarded area dimmed and the kept box outlined (CapCut-like)."""
+    g = (base.astype(np.float32) * 0.30).astype(np.uint8)
+    x, y, w, h = crop_rect
+    g[y:y + h, x:x + w] = base[y:y + h, x:x + w]
+    th = max(2, base.shape[1] // 300)
+    cv2.rectangle(g, (x, y), (x + w - 1, y + h - 1), (80, 230, 80), th)
+    if zoomed_rect != crop_rect:
+        zx, zy, zw, zh = zoomed_rect
+        cv2.rectangle(g, (zx, zy), (zx + zw - 1, zy + zh - 1), (40, 214, 255), max(1, th - 1))
+    return g
 
 
 def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     cache_dir = os.path.dirname(os.path.abspath(out_png))
     t = max(0.0, min(float(t), PREVIEW_SECS))
-    base = _preview_frame_at(src, cache_dir, s.height, s.crop, t)
-    H, W = base.shape[:2]
-    fr = zoom_flip(base.copy(), s.zoom, s.flip)
+    base, clip = _preview_frame_at(src, cache_dir, s.height, t)
+    bh, bw = base.shape[:2]
+
+    auto = None
+    if s.crop_mode == "auto":
+        if clip not in _PV_AUTO:
+            _PV_AUTO[clip] = detect_crop(clip)
+        auto = _PV_AUTO[clip]
+    base_rect = resolve_crop(bw, bh, s, auto)
+    W, H = out_size(base_rect, bh)
+    rect = zoom_rect(base_rect, s.zoom)
+    fr = apply_view(base, rect, W, H, bool(s.flip))
+
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
         if ov:
             blend_overlay(fr, ov, (t / PREVIEW_SECS) if s.sub_sweep else None)
     cv2.imwrite(out_png, fr)
+    cv2.imwrite(out_png[:-4] + "_guide.png", _guide_image(base, base_rect, rect))
     return out_png
 
 
@@ -1529,7 +1709,7 @@ def _synthesize(proj, my_list, s, progress, proxy):
     wd = proj.path
     n = len(my_list)
     voice = s.resolved_voice()
-    # 🆕 language-specific trim (English = no apad)
+    # language-specific trim (English = gapless: hard silence trim, no apad)
     trim_filter = LANG_CONF[s.lang].get("trim", TRIM)
     sig_base = f"edge|{voice}|{s.rate_str()}|noref|{trim_filter}"
 
@@ -1686,6 +1866,15 @@ def run_render(proj, s, proxy=None, progress=None):
 SUP = argparse.SUPPRESS
 
 
+def _crop_box(v):
+    try:
+        parts = [float(x) for x in v.split(",")]
+        assert len(parts) == 4
+        return tuple(parts)
+    except Exception:
+        raise argparse.ArgumentTypeError("--crop-box L,T,R,B (percent trimmed from each side) e.g. 0,10,0,20")
+
+
 def add_style_args(p):
     g = p.add_argument_group("voice / language")
     g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en")
@@ -1703,10 +1892,19 @@ def add_style_args(p):
     g.add_argument("--preset", choices=["ultrafast", "superfast", "veryfast"], default=SUP)
     g.add_argument("--max-speed", type=float, default=SUP, help="max video speed-up (1.0-2.0)")
     g.add_argument("--zoom", type=float, default=SUP, help="1.0-1.25")
-    g.add_argument("--no-crop", dest="crop", action="store_false", default=SUP,
-                   help="black bar auto-crop မလုပ်ဘူး")
+    g.add_argument("--render-workers", type=int, default=SUP,
+                   help="parallel render chunks (0 = auto)")
     g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP,
                    help="mirror မလုပ်ဘူး")
+    g = p.add_argument_group("crop")
+    g.add_argument("--crop-mode", dest="crop_mode", choices=["auto", "none", "custom"],
+                   default=SUP, help="auto = black-bar detect · custom = --crop-box")
+    g.add_argument("--no-crop", dest="crop_mode", action="store_const", const="none",
+                   default=SUP, help="crop မလုပ်ဘူး")
+    g.add_argument("--crop-box", type=_crop_box, default=SUP,
+                   help="custom crop: L,T,R,B percent trimmed from each side (sets --crop-mode custom)")
+    g.add_argument("--aspect", choices=list(ASPECTS), default=SUP,
+                   help="force aspect ratio for custom crop (free | 9:16 | 1:1 | 4:5 | 3:4 | 16:9 | 4:3)")
     g = p.add_argument_group("subtitles")
     g.add_argument("--no-sub", dest="sub", action="store_false", default=SUP)
     g.add_argument("--no-sweep", dest="sub_sweep", action="store_false", default=SUP,
@@ -1730,6 +1928,17 @@ def settings_for(proj, args):
     for k, v in vars(args).items():
         if hasattr(s, k):
             setattr(s, k, v)
+    box = getattr(args, "crop_box", None)
+    if box:
+        s.crop_l, s.crop_t, s.crop_r, s.crop_b = box
+        if getattr(args, "crop_mode", None) is None:
+            s.crop_mode = "custom"
+    if s.crop_mode not in ("auto", "none", "custom"):
+        s.crop_mode = "auto"
+    if s.aspect not in ASPECTS:
+        s.aspect = "free"
+    for a in ("crop_l", "crop_t", "crop_r", "crop_b"):
+        setattr(s, a, max(0.0, min(45.0, float(getattr(s, a)))))
     if s.rate is not None:
         s.rate = max(-50, min(100, int(s.rate)))
     s.max_speed = max(1.0, min(2.0, s.max_speed))
@@ -1738,6 +1947,7 @@ def settings_for(proj, args):
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
     s.loud_lufs = max(-24.0, min(-8.0, float(s.loud_lufs)))
+    s.render_workers = max(0, min(16, int(s.render_workers)))
     if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -1828,7 +2038,7 @@ def cmd_preview(args):
     out = args.output or os.path.join(proj.path, "preview.png")
     make_preview_frame(proj.video, out, s, LANG_CONF[s.lang]["sample"], font,
                        LANG_CONF[s.lang]["is_mm"], getattr(args, "at", 0.0) or 0.0)
-    print(f"✅ {out}")
+    print(f"✅ {out}\n   crop guide: {out[:-4]}_guide.png")
 
 
 def cmd_run(args):
@@ -1899,7 +2109,7 @@ def build_parser():
     add_style_args(a)
     a.set_defaults(fn=cmd_render)
 
-    a = sub.add_parser("preview", help="စာတန်း style စစ်ဖို့ ပုံတစ်ပုံ")
+    a = sub.add_parser("preview", help="စာတန်း style / crop စစ်ဖို့ ပုံတစ်ပုံ (+ _guide.png)")
     a.add_argument("dir")
     a.add_argument("-o", "--output")
     a.add_argument("--at", type=float, default=0.0, help="preview time (0-5 seconds)")
@@ -2021,18 +2231,23 @@ def launch_ui():
         threading.Thread(target=work, daemon=True).start()
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
-    def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos,
-                 sweep, pv_t, strict):
+    # preview inputs (after pdir): lang_name, height, zoom, crop_mode, aspect,
+    #   crop_l, crop_t, crop_r, crop_b, flip, sub, sub_size, sub_pos, sweep, pv_t
+    def _preview(pdir, lang_name, height, zoom, crop_mode, aspect, cl, ct, cr, cb_,
+                 flip, sub, sub_size, sub_pos, sweep, pv_t, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
-            return gr.skip()
+            return gr.skip(), gr.skip()
         code = LANGS[lang_name]
         try:
             proj = Project.load(pdir)
             s = proj.settings
             s.lang, s.height, s.zoom = code, int(height), float(zoom)
-            s.crop, s.flip, s.sub = bool(crop), bool(flip), bool(sub)
+            s.crop_mode = crop_mode if crop_mode in ("auto", "none", "custom") else "auto"
+            s.aspect = aspect if aspect in ASPECTS else "free"
+            s.crop_l, s.crop_t, s.crop_r, s.crop_b = float(cl), float(ct), float(cr), float(cb_)
+            s.flip, s.sub = bool(flip), bool(sub)
             s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
             font = find_font(code, s.font) if s.sub else None
             for old in glob.glob(os.path.join(pdir, "preview_*.png")):
@@ -2043,37 +2258,35 @@ def launch_ui():
             out = os.path.join(pdir, f"preview_{int(time.time() * 1000)}.png")
             make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
                                LANG_CONF[code]["is_mm"], float(pv_t or 0.0))
-            return out
+            return out, out[:-4] + "_guide.png"
         except Exception as ex:
             log(f"preview error: {ex}")
             if strict:
                 raise gr.Error(str(ex)[:400])
-            return gr.skip()
+            return gr.skip(), gr.skip()
 
     def preview_auto(*a):
         return _preview(*a, False)
 
-    def poll_fetch(jid, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep,
-                   pv_t):
+    def poll_fetch(jid, *pv):
         st = FETCH.get(jid) if jid else None
         if st is None:
-            return gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
+            return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.Timer(active=False)
         elapsed = time.time() - st["t0"]
         if not st["done"]:
             if st["f"] >= 1.0:
                 msg = "🔄 MP4 ပြင်ဆင်နေတယ် (ဖိုင်ကြီးရင် ခဏကြာမယ်)"
             else:
                 msg = f"⬇️ {st['label']} {int(st['f'] * 100)}%"
-            return gr.skip(), f"{msg} · {elapsed:.0f}s", gr.skip(), gr.skip()
+            return gr.skip(), f"{msg} · {elapsed:.0f}s", gr.skip(), gr.skip(), gr.skip()
         FETCH.pop(jid, None)
         if st["err"] is not None:
-            return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.Timer(active=False)
+            return "", f"❌ {str(st['err'])[:500]}", gr.skip(), gr.skip(), gr.Timer(active=False)
         pdir, proj = st["res"]
         mb = os.path.getsize(proj.video) / 1e6
-        img = _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size, sub_pos,
-                       sweep, pv_t, False)
-        return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း ချိန်ပြီး 1️⃣ နှိပ်ပါ",
-                img, gr.Timer(active=False))
+        img, guide = _preview(pdir, *pv, False)
+        return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ Crop / စာတန်း ချိန်ပြီး 1️⃣ နှိပ်ပါ",
+                img, guide, gr.Timer(active=False))
 
     TRANS = {}
 
@@ -2125,8 +2338,9 @@ def launch_ui():
                 chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
 
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
-              height, fps, preset, max_speed, crop, flip, zoom,
-              sub, sub_size, sub_pos, sweep,
+              height, fps, preset, max_speed,
+              crop_mode, aspect, cl, ct, cr, cb_, flip, zoom,
+              sub, sub_size, sub_pos, sweep, rworkers,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
@@ -2144,7 +2358,11 @@ def launch_ui():
             s.voice = voice if voice in voices_for(code) else ""
             s.rate, s.tts_workers = int(rate), int(workers)
             s.height, s.fps, s.preset = int(height), int(fps), preset
-            s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
+            s.max_speed, s.flip, s.zoom = float(max_speed), bool(flip), float(zoom)
+            s.crop_mode = crop_mode if crop_mode in ("auto", "none", "custom") else "auto"
+            s.aspect = aspect if aspect in ASPECTS else "free"
+            s.crop_l, s.crop_t, s.crop_r, s.crop_b = float(cl), float(ct), float(cr), float(cb_)
+            s.render_workers = int(rworkers)
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
             prog = Progress(0.0, 1.0, parent=_cb(progress))
@@ -2169,7 +2387,7 @@ def launch_ui():
     def reset_all(pdir):
         if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
             shutil.rmtree(pdir, ignore_errors=True)
-        return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
+        return "", "", "", [], {}, "", None, None, None, None, "🗑️ ရှင်းပြီး"
 
     def make_setter(lo, hi):
         def f(text, parts):
@@ -2219,13 +2437,26 @@ def launch_ui():
         b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
         status_fetch = gr.Markdown()
 
-        gr.Markdown("### 🎨 စာတန်း Preview (Crop ပါ ဒီမှာ ပြမယ်)")
-        pv_img = gr.Image(label="Preview", type="filepath", interactive=False)
+        gr.Markdown("### 🎨 Preview (Crop + စာတန်း)")
+        pv_img = gr.Image(label="Preview (ရလဒ်)", type="filepath", interactive=False)
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
                          label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့်)")
-        crop = gr.Checkbox(True, label="✂️ Crop (black bar ဖြတ်) — Preview မှာ ချက်ချင်း ပြမယ်")
 
-        with gr.Accordion("🎛️ စာတန်း / Mirror", open=False):
+        with gr.Accordion("✂️ Crop (CapCut လို custom crop)", open=True):
+            crop_mode = gr.Radio([("Auto (black bar)", "auto"), ("မဖြတ်ဘူး", "none"),
+                                  ("✂️ Custom", "custom")], value="auto", label="Crop mode")
+            guide_img = gr.Image(label="Crop guide — အစိမ်းရောင်ဘောင်ထဲက အပိုင်းကိုပဲ ယူမယ်၊ မှောင်နေတာ ဖြတ်ထုတ်မယ်",
+                                 type="filepath", interactive=False)
+            aspect = gr.Dropdown(list(ASPECTS), value="free",
+                                 label="Aspect ratio (Custom မှာသာ — free = အလိုအတိုင်း)")
+            with gr.Row():
+                crop_l = gr.Slider(0, 45, value=0, step=0.5, label="ဘယ်ဘက် ဖြတ် %")
+                crop_r = gr.Slider(0, 45, value=0, step=0.5, label="ညာဘက် ဖြတ် %")
+            with gr.Row():
+                crop_t = gr.Slider(0, 45, value=0, step=0.5, label="အပေါ် ဖြတ် %")
+                crop_b = gr.Slider(0, 45, value=0, step=0.5, label="အောက် ဖြတ် %")
+
+        with gr.Accordion("🎛️ စာတန်း / Mirror / Render", open=False):
             with gr.Row():
                 sub = gr.Checkbox(True, label="စာတန်း")
                 sweep = gr.Checkbox(True, label="🎵 Music sweep")
@@ -2233,19 +2464,21 @@ def launch_ui():
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
+            rworkers = gr.Slider(0, 12, value=0, step=1,
+                                 label="Render တစ်ပြိုင်နက် (0 = auto · CPU core အလိုက်)")
 
-        pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
+        pv_in = [pdir_state, lang, height, zoom, crop_mode, aspect, crop_l, crop_t, crop_r,
+                 crop_b, flip, sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click, upload.upload):
             trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
-        fetch_timer.tick(poll_fetch,
-                         [fetch_job, lang, height, zoom, crop, flip, sub, sub_size, sub_pos,
-                          sweep, pv_t],
-                         [pdir_state, status_fetch, pv_img, fetch_timer],
+        fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
+                         [pdir_state, status_fetch, pv_img, guide_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, crop, lang, pv_t):
-            c.change(preview_auto, pv_in, pv_img,
+        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, crop_mode, aspect, crop_l,
+                  crop_t, crop_r, crop_b, lang, pv_t):
+            c.change(preview_auto, pv_in, [pv_img, guide_img],
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
         gr.Markdown("### 1️⃣ စာသားထုတ်")
@@ -2287,12 +2520,13 @@ def launch_ui():
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
-                         height, fps, preset, max_speed, crop, flip, zoom,
-                         sub, sub_size, sub_pos, sweep],
+                         height, fps, preset, max_speed,
+                         crop_mode, aspect, crop_l, crop_t, crop_r, crop_b, flip, zoom,
+                         sub, sub_size, sub_pos, sweep, rworkers],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-                  pv_img, video, dl, status2])
+                  pv_img, guide_img, video, dl, status2])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
