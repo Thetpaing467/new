@@ -7,7 +7,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang en
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.16.0"
+__version__ = "1.17.0"
 
 import argparse
 import asyncio
@@ -43,6 +43,7 @@ SUB_LINES = 2                    # subtitle box always has this many text lines
 PREVIEW_SECS = 5.0               # preview scrub range (seconds)
 CHUNK = 100                      # lines per Gemini prompt part
 
+# Default trim (Burmese / German) — silence trim + 0.2s pad
 TRIM = (
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,apad=pad_dur=0.2"
@@ -243,7 +244,6 @@ _STORY_DE = (
     "say it. "
 )
 
-# ---- English Dramatic / Cinematic (the chosen C style) ------------------
 _STORY_EN = (
     "ENGLISH DRAMATIC RECAP NARRATOR (very important): you are a cinematic drama-recap "
     "narrator for a YouTube/TikTok recap channel. Your voice is tense, gripping and emotional — "
@@ -334,12 +334,19 @@ def _tail(script, accent, story):
     )
 
 
+# English trim — no apad, so line gaps are ~0.3–0.5s instead of 0.5–0.8s
+TRIM_EN = (
+    "silenceremove=start_periods=1:start_threshold=-50dB,areverse,"
+    "silenceremove=start_periods=1:start_threshold=-50dB,areverse"
+)
+
 LANG_CONF = {
     "my": {
         "name": "Burmese",
         "label": "မြန်မာ",
         "sample": "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။",
         "rate": 45,
+        "trim": TRIM,
         "edge_voices": [
             ("my-MM-ThihaNeural", "Thiha (male)"),
             ("my-MM-NilarNeural", "Nilar (female)"),
@@ -372,6 +379,7 @@ LANG_CONF = {
         "label": "ဂျာမနီ",
         "sample": "Dies ist ein Beispiel-Untertitel.",
         "rate": 10,
+        "trim": TRIM,
         "edge_voices": [
             ("de-DE-KatjaNeural", "Katja (female)"),
             ("de-DE-ConradNeural", "Conrad (male)"),
@@ -407,6 +415,7 @@ LANG_CONF = {
         "label": "အင်္ဂလိပ်",
         "sample": "This is a sample subtitle line.",
         "rate": 5,
+        "trim": TRIM_EN,   # ← English သာ — apad မပါ (0.3–0.5s gaps)
         "edge_voices": [
             ("en-US-AriaNeural", "Aria (female, US)"),
             ("en-US-GuyNeural", "Guy (male, US)"),
@@ -1520,7 +1529,9 @@ def _synthesize(proj, my_list, s, progress, proxy):
     wd = proj.path
     n = len(my_list)
     voice = s.resolved_voice()
-    sig_base = f"edge|{voice}|{s.rate_str()}|noref"
+    # 🆕 language-specific trim (English = no apad)
+    trim_filter = LANG_CONF[s.lang].get("trim", TRIM)
+    sig_base = f"edge|{voice}|{s.rate_str()}|noref|{trim_filter}"
 
     def do_line(i):
         wav = os.path.join(wd, f"a{i:04d}.wav")
@@ -1542,7 +1553,8 @@ def _synthesize(proj, my_list, s, progress, proxy):
                 if attempt == 3:
                     raise RuntimeError(f"Edge TTS မအောင်မြင်ပါ (စာကြောင်း #{i}): {ex}\n{my_list[i]}")
                 time.sleep(1.5)
-        sh(["ffmpeg", "-y", "-i", raw_audio, "-af", TRIM, "-ar", "44100", "-ac", "1", wav])
+        sh(["ffmpeg", "-y", "-i", raw_audio, "-af", trim_filter,
+            "-ar", "44100", "-ac", "1", wav])
         with open(keyf, "w") as kf:
             kf.write(key)
         return i, wav_dur(wav)
