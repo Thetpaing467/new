@@ -1,13 +1,14 @@
 """Recap CLI (slim): Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render -> auto split.
 
-Languages: Burmese (my) / German (de)   ·   Sources: YouTube / TikTok (yt-dlp), Rednote, local file
+Languages: Burmese (my) / German (de) / English (en)   ·   Sources: YouTube / TikTok (yt-dlp), Rednote, local file
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my --split 2
        python recap.py run <video|url> -d work/ep1 --lang de --no-split
+       python recap.py run <video|url> -d work/ep1 --lang en --split 2
        python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
-       python recap.py ui            (Gradio web UI, dark mode)
+       python recap.py ui            (Gradio web UI, dark mode + voice audition)
 """
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 import argparse
 import asyncio
@@ -52,7 +53,6 @@ TRIM = (
 # ----------------------------------------------------------------------
 # Prompt building blocks
 # ----------------------------------------------------------------------
-# {accent} is replaced with a language specific hint (plain str.replace, no .format()).
 _HUMAN = (
     "VOICE STYLE (very important): the result will be read aloud by a speech engine, so it must "
     "sound like a real human storyteller talking to a friend, NOT a robot reading text. "
@@ -64,7 +64,6 @@ _HUMAN = (
     "Do NOT use ellipsis (...), emoji, brackets, asterisks or stage directions. "
 )
 
-# Recap mode: condense instead of literal translation (used in the main prompt of every language).
 _RECAP_MODE = (
     "RECAP MODE (very important): first read ALL numbered lines below and understand the whole "
     "story: who the characters are, what happens, and why. Then retell each line as recap "
@@ -75,13 +74,11 @@ _RECAP_MODE = (
     "Do NOT move content between lines and do NOT invent events that are not in the source. "
 )
 
-# Reminder used at the top of every later part (chat memory keeps the story, this keeps the style).
 _RECAP_NOTE = (
     "Continue in the same RECAP MODE as the earlier parts: condense, keep only story-moving "
     "content, about 50-70% of a literal translation, never leave a line empty. "
 )
 
-# Language-neutral drama-recap rules (shared by every language).
 _STORY_CORE = (
     "NARRATION STYLE (drama-recap, third person): the source lines are raw speech-to-text of "
     "characters TALKING. Do NOT translate them as direct dialogue and do NOT use quotation marks. "
@@ -250,6 +247,70 @@ _STORY_DE = (
     "say it. "
 )
 
+# ---- English specific (natural spoken recap, NOT translated-sounding) ---
+_STORY_EN = (
+    "ENGLISH STORYTELLER VOICE (very important): write like a real English speaker telling "
+    "a friend what happened in a series over coffee. It must NOT sound like a translation, "
+    "a news article, a Wikipedia summary, or a subtitle file. "
+
+    "TENSE: tell the whole recap in the simple present tense, the way people retell a film: "
+    "'Xiao Li comes home and sees that the door is open.' Use past perfect only for things "
+    "that happened earlier ('She had promised him that years ago.'). Do not mix tenses. "
+
+    "REPORTED SPEECH, THE SPOKEN WAY: use a natural 'that' clause or plain reporting: "
+    "'She says she's had enough.' or 'He tells her that he's leaving.' "
+    "NEVER use stiff literary reported speech ('she stated that she would henceforth...'). "
+
+    "REPORTING VERBS (very important): never the same reporting verb in two consecutive "
+    "lines, and 'says' at most once every four lines. Rotate: asks, answers, explains, "
+    "tells, snaps, shouts, whispers, warns, promises, denies, admits, laughs, threatens, "
+    "begs, mutters, fires back, presses. When the action already shows it, drop the "
+    "reporting verb and just state what the person does. "
+
+    "SPOKEN ENGLISH FEEL: use everyday words and contractions (it's, he's, they're, "
+    "gonna, wanna, kinda — but not in every line). Prefer lively verbs to noun phrases: "
+    "NOT 'He engages in a conversation with her' but 'They talk'; NOT 'She makes the "
+    "decision to leave' but 'She decides to leave.' No business English, no "
+    "'utilize', 'commence', 'prior to', 'in order to' in every line. "
+
+    "SENTENCE VARIETY: mix short lines ('The door is open.') with medium ones. Do not "
+    "start every sentence with the character's name; sometimes start with a time or place "
+    "('The next morning ...', 'A moment later ...', 'Out in the hallway ...'). Do not start "
+    "more than two lines in a row with the same word. Avoid long nested sentences. "
+
+    "CONNECTORS: vary them — and then, but, suddenly, a moment later, meanwhile, still, "
+    "yet, of all people, hardly is she inside when, in the meantime, all at once, only. "
+
+    "IDIOMS: never translate Chinese or other idioms literally. Replace them with an "
+    "English expression that people really say, or just say plainly what is meant. "
+
+    "PRONOUNS: use he, she, him, her, they, them naturally so the text flows and does "
+    "not repeat names all the time. If two characters of the same gender are in the scene, "
+    "use the name or a role word (his mother, the boss) instead, so nobody gets mixed up. "
+
+    "NAMES: keep Chinese and other Asian names in their Latin / Pinyin spelling, exactly "
+    "the same every time, never translate them. If a name is not known, never write 'the "
+    "person', 'someone' or 'a person'. Use a simple role word from the context (the mother, "
+    "the father, the boss, the neighbour, the girlfriend) or a look-based word: the young "
+    "man, the young woman, the old man, the older woman, the little girl — and keep the "
+    "same word for the same person. "
+
+    "NUMBERS & SYMBOLS (English): write everything as words, never digits or symbols: "
+    "'50%' -> 'fifty percent', '100 dollars' -> 'a hundred dollars', '3 o'clock' -> "
+    "'three o'clock', '2019' -> 'twenty nineteen', '1.5 million' -> 'one and a half "
+    "million'. No abbreviations: 'for example' instead of 'e.g.', 'and so on' instead "
+    "of 'etc.'. "
+
+    "EMOTION: show feelings through word choice and rhythm: 'She yells at him', 'he "
+    "whispers with tears in his eyes', 'she smiles coldly', 'he can't believe his ears'. "
+    "A question a character asks should come across as a real question: 'She asks him "
+    "how he even knows that.' "
+
+    "FINAL SELF-CHECK for every line: imagine reading it aloud to a friend. If it sounds "
+    "like a translation, a textbook or a robot, rewrite it the way a native English "
+    "speaker would really say it. "
+)
+
 
 def _tail(script, accent, story):
     """Common prompt tail. Built with plain concatenation (no str.format) so braces are safe."""
@@ -331,9 +392,46 @@ LANG_CONF = {
         "clean": r"[^A-Za-zÄÖÜäöüß0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
+    "en": {
+        "name": "English",
+        "label": "အင်္ဂလိပ်",
+        "sample": "This is a sample subtitle line.",
+        "rate": 0,
+        "edge_voices": [
+            ("en-US-AriaNeural", "Aria (female, US)"),
+            ("en-US-GuyNeural", "Guy (male, US)"),
+            ("en-US-JennyNeural", "Jenny (female, US)"),
+            ("en-GB-SoniaNeural", "Sonia (female, UK)"),
+            ("en-GB-RyanNeural", "Ryan (male, UK)"),
+            ("en-AU-NatashaNeural", "Natasha (female, AU)"),
+        ],
+        "sentence_end": r"(?<=[.!?])\s+",
+        "prompt": (
+            "You are a native English storyteller who retells TV dramas to friends in a "
+            "recap video. Rewrite every numbered line below as natural, relaxed, spoken "
+            "English — the way a real person would tell it, not a translation. "
+            + _tail(
+                script="use ONLY English (Latin script), no Chinese letters.",
+                accent=("Speak relaxed, everyday English as in a chat with a friend: "
+                        "contractions like 'it's', 'he's', 'they're' are fine, and put a "
+                        "comma at every natural breath point."),
+                story=_STORY_EN)
+        ),
+        "chunk_note": (
+            _RECAP_NOTE +
+            "Keep character names, their spelling and role words exactly the same as in the "
+            "other parts. Keep the same tense (simple present) and the same relaxed spoken "
+            "English tone as in all other parts. Vary reporting verbs and sentence openings; "
+            "'says' at most once every four lines. Use he/she/they naturally, but use the "
+            "name when two characters of the same gender are in the scene."
+        ),
+        "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
+        "clean": r"[^A-Za-z0-9\s.,!?\"'%\-]",
+        "is_mm": False,
+    },
 }
 
-# Burmese name aliases are accepted on the command line too
+# Language aliases on the command line (label + English name)
 LANG_ALIASES = {c["label"]: k for k, c in LANG_CONF.items()}
 LANG_ALIASES.update({c["name"].lower(): k for k, c in LANG_CONF.items()})
 
@@ -346,44 +444,44 @@ def resolve_lang(value):
         return LANG_ALIASES[v]
     if v.lower() in LANG_ALIASES:
         return LANG_ALIASES[v.lower()]
-    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de)")
+    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de / en)")
 
 
 @dataclass
 class Settings:
     # TTS (Edge only)
     lang: str = "my"
-    voice: str = ""               # empty -> first voice of language
-    rate: Optional[int] = None    # Edge speed % · None -> language default (my 45 / de 10)
+    voice: str = ""
+    rate: Optional[int] = None
     tts_workers: int = 8
     # Audio mix
-    loud_lufs: float = -14.0      # voice loudness target (ပိုကျယ်ချင်ရင် -12)
-    voice_db: float = 0.0         # extra voice gain (dB)
-    bgm: str = ""                 # background music file path
-    bgm_vol: float = 0.25         # BGM volume (0-1)
-    duck: bool = True             # lower BGM automatically while the narrator speaks
+    loud_lufs: float = -14.0
+    voice_db: float = 0.0
+    bgm: str = ""
+    bgm_vol: float = 0.25
+    duck: bool = True
     # Video
     height: int = 720
     fps: int = 24
     preset: str = "ultrafast"
     max_speed: float = 1.25
-    crop: bool = True             # auto-remove black bars
-    flip: bool = True             # mirror horizontally
+    crop: bool = True
+    flip: bool = True
     zoom: float = 1.0
     # Split
-    split: bool = True            # ON / OFF switch for splitting
-    split_min: float = 2.0        # minutes per part
+    split: bool = True
+    split_min: float = 2.0
     # Subtitles
     sub: bool = True
-    sub_size: float = 7.0         # % of width
-    sub_pos: int = 90             # 0 = top, 100 = bottom
+    sub_size: float = 7.0
+    sub_pos: int = 90
     sub_alpha: int = 140
-    sub_sweep: bool = True        # music-style light sweep across the subtitle
-    font: str = ""                # explicit font path
+    sub_sweep: bool = True
+    font: str = ""
     # Neon
     neon: bool = True
     neon_th: int = 3
-    neon_speed: float = 0.15      # laps per second
+    neon_speed: float = 0.15
 
     def to_dict(self):
         return asdict(self)
@@ -506,7 +604,6 @@ def _globs(base):
 
 
 def find_font(lang="my", explicit=""):
-    """Order: --font path -> RECAP_FONT env -> repo fonts/ -> system fonts."""
     conf = LANG_CONF[lang]
     if explicit and os.path.exists(explicit):
         return explicit
@@ -634,22 +731,17 @@ def split_for_sub(text, mc=36, lang="my"):
 
 
 # ======================================================================
-# overlay: subtitle (Pillow), music sweep, neon border, zoom/flip
+# overlay
 # ======================================================================
-SWEEP_TRAIL = np.array([185, 232, 255], np.float32)   # BGR warm light (gold ပေါ်မှာ မြင်ရအောင်)
+SWEEP_TRAIL = np.array([185, 232, 255], np.float32)
 SWEEP_BAND = np.array([235, 255, 255], np.float32)
-
-GLASS_TINT = np.array([86, 104, 124], np.float32)     # BGR  (RGB 124,104,86 = warm brown-grey glass)
-GOLD = (255, 214, 40)                                  # RGB  စာအရောင် (ရွှေဝါ)
+GLASS_TINT = np.array([86, 104, 124], np.float32)
+GOLD = (255, 214, 40)
 
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
                   layout="raqm", is_mm=True):
-    """Frosted-glass subtitle: the box is NOT a flat black fill any more. The real video behind
-    it is blurred (done per frame in blend_overlay) and tinted warm brown-grey, with a thin
-    light edge, then gold text with a dark outline on top.
-    alpha (0-255) = glass tint strength (default 140)."""
-    mx = int(W * 0.04)                       # side margin -> floating box like the reference
+    mx = int(W * 0.04)
     bw = W - 2 * mx
     pad_x, pad_y = int(fs * 0.6), int(fs * 0.5)
     lh_box = int(fs * 1.4)
@@ -667,7 +759,6 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
     if not lines:
         return None
 
-    # ---- glass shape (anti-aliased rounded rectangle) + thin light edge
     radius = max(4, int(fs * 0.30))
     m = Image.new("L", (bw, bh), 0)
     ImageDraw.Draw(m).rounded_rectangle([0, 0, bw - 1, bh - 1], radius=radius, fill=255)
@@ -677,11 +768,10 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
     ImageDraw.Draw(inner).rounded_rectangle([2, 2, bw - 3, bh - 3],
                                             radius=max(2, radius - 2), fill=255)
     inner = cv2.GaussianBlur(np.array(inner).astype(np.float32) / 255.0, (0, 0), 0.8)
-    grad = np.linspace(1.0, 0.25, bh, dtype=np.float32)[:, None]     # top edge brighter
+    grad = np.linspace(1.0, 0.25, bh, dtype=np.float32)[:, None]
     edge = np.clip(mask - inner, 0.0, 1.0) * grad * 0.40
-    sheen = (np.linspace(16.0, 0.0, bh, dtype=np.float32))[:, None, None]  # soft glass reflection
+    sheen = (np.linspace(16.0, 0.0, bh, dtype=np.float32))[:, None, None]
 
-    # ---- text (gold fill + dark outline), drawn in box-local coordinates
     img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     ink_img = Image.new("L", (bw, bh), 0)
@@ -692,7 +782,7 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
     ty = (bh - len(lines) * lh) // 2
     for ln in lines:
         lx = (bw - font.getlength(ln)) / 2
-        d.text((lx + 1, ty + 2), ln, font=font, fill=(0, 0, 0, 170),          # soft drop shadow
+        d.text((lx + 1, ty + 2), ln, font=font, fill=(0, 0, 0, 170),
                stroke_width=sw, stroke_fill=(0, 0, 0, 170))
         d.text((lx, ty), ln, font=font, fill=(0, 0, 0, 255),
                stroke_width=sw, stroke_fill=(0, 0, 0, 255))
@@ -716,20 +806,12 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
 def blend_overlay(fr, ov, p=None):
     y0, y1, x0, x1 = ov["y0"], ov["y1"], ov["x0"], ov["x1"]
     base = fr[y0:y1, x0:x1]
-
-    # 1) frosted glass: blur what is really behind the box, then tint it
     blur = cv2.GaussianBlur(base, (0, 0), ov["sigma"]).astype(np.float32)
     ta = ov["tint_a"]
     glass = blur * (1.0 - ta) + GLASS_TINT * ta + ov["sheen"]
     reg = base.astype(np.float32) * (1.0 - ov["mask"]) + glass * ov["mask"]
-
-    # 2) thin light glass edge
     reg = reg * (1.0 - ov["edge"]) + 255.0 * ov["edge"]
-
-    # 3) text
     reg = reg * ov["inv"] + ov["pre"]
-
-    # 4) music-style light sweep over the letters
     if p is not None:
         W = reg.shape[1]
         p = max(0.0, min(float(p), 1.0))
@@ -744,7 +826,6 @@ def blend_overlay(fr, ov, p=None):
         k_band = np.clip(band * 0.95, 0.0, 1.0) * tm
         reg = reg * (1.0 - k_band) + SWEEP_BAND * k_band
         reg += band * (1.0 - ov["inv"]) * 22.0
-
     fr[y0:y1, x0:x1] = np.clip(reg, 0, 255).astype(np.uint8)
 
 
@@ -800,7 +881,7 @@ def zoom_flip(fr, zoom, flip):
 
 
 # ======================================================================
-# download: YouTube / TikTok (yt-dlp) · Rednote · local file
+# download
 # ======================================================================
 _RED_HOSTS = ("xhslink.com", "xiaohongshu.com", "rednote.com", "xhs.cn")
 _RED_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
@@ -808,7 +889,6 @@ _RED_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/6
 
 
 def extract_url(text):
-    """Share စာသားတစ်ခုလုံး paste လုပ်ထားရင်တောင် ထဲက http(s) link ကို ထုတ်ယူ။"""
     text = (text or "").strip()
     if os.path.isfile(text):
         return text
@@ -846,7 +926,7 @@ def _red_video_urls(html):
             _walk(json.loads(raw), urls)
         except Exception:
             pass
-    if not urls:   # JSON မဖတ်နိုင်ရင် regex နဲ့ တိုက်ရိုက်ရှာ
+    if not urls:
         for u in re.findall(r'"(?:masterUrl|backupUrls?)"\s*:\s*\[?\s*"([^"]+)"', html):
             urls.append(u.encode().decode("unicode_escape", "ignore"))
         for u in re.findall(r'https?:\\?/\\?/sns-video[^"\\\s]+(?:\\/[^"\s\\]+)*', html):
@@ -958,13 +1038,11 @@ def ensure_mp4(raw, final, height):
 
 def fetch_video(source, final, height=720, progress=None, cookies_file=None):
     source = extract_url(source)
-
-    if not re.match(r"^https?://", source, re.I):      # local file
+    if not re.match(r"^https?://", source, re.I):
         if not os.path.isfile(source):
             raise FileNotFoundError(f"ဖိုင် မတွေ့ပါ: {source}")
         ensure_mp4(source, final, height)
         return final
-
     work = tempfile.mkdtemp(prefix="dl_")
     try:
         host = urlparse(source).netloc.lower()
@@ -993,7 +1071,7 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
 
 
 # ======================================================================
-# transcribe (faster-whisper)
+# transcribe
 # ======================================================================
 _MODELS = {}
 
@@ -1073,7 +1151,7 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
 
 
 # ======================================================================
-# translate (prompt building / parsing)
+# translate
 # ======================================================================
 def build_prompt(units, lang="my"):
     lines = "\n".join(f"[{i}] {u['src']}" for i, u in enumerate(units))
@@ -1115,7 +1193,7 @@ def check_part(text, lo, hi):
 
 
 # ======================================================================
-# tts (Edge only)
+# tts
 # ======================================================================
 def tts_edge(text, voice, rate, mp3, proxy=None):
     import edge_tts
@@ -1125,6 +1203,29 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
         await edge_tts.Communicate(text, voice, rate=rate, **kw).save(mp3)
 
     asyncio.run(run())
+
+
+# ======================================================================
+# voice audition (Web UI sample player)
+# ======================================================================
+_VOICE_SAMPLE_DIR = os.path.join(tempfile.gettempdir(), "recap_voice_samples")
+
+
+def voice_sample(voice, lang="my", rate=None, text=None):
+    """Edge voice တစ်ခုကို စမ်းပြီး mp3 path ပြန်ပေး။ Cache လုပ်ထားတယ်။"""
+    if not voice:
+        raise RuntimeError("voice မရွေးရသေးပါ")
+    conf = LANG_CONF.get(lang) or LANG_CONF["my"]
+    rate_val = int(conf.get("rate", 0)) if rate is None else int(rate)
+    rate_str = f"{rate_val:+d}%"
+    sample_text = (text or "").strip() or conf["sample"]
+    os.makedirs(_VOICE_SAMPLE_DIR, exist_ok=True)
+    key = hashlib.md5(f"{voice}|{rate_str}|{sample_text}".encode()).hexdigest()[:16]
+    out = os.path.join(_VOICE_SAMPLE_DIR, f"{key}.mp3")
+    if os.path.exists(out) and os.path.getsize(out) > 512:
+        return out
+    tts_edge(sample_text, voice, rate_str, out, os.environ.get("EDGE_TTS_PROXY") or None)
+    return out
 
 
 # ======================================================================
@@ -1141,7 +1242,6 @@ def detect_crop(src):
 
 
 def prepare_video(src, dst, target_h, crop=True):
-    """Used only by the preview clip now (render_final crops/scales in-process)."""
     target_h = int(target_h) // 2 * 2
     vf = None
     if crop:
@@ -1167,7 +1267,6 @@ def prepare_video(src, dst, target_h, crop=True):
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
-    # --- crop + scale happen inside the frame producer (no separate prepare/encode pass)
     cap = cv2.VideoCapture(src)
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1237,7 +1336,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         finally:
             put(None)
 
-    # force a keyframe at every split boundary so split_video can use `-c copy`
     kf = []
     if s.split and s.split_min and s.split_min > 0:
         kf = ["-force_key_frames", f"expr:gte(t,n_forced*{float(s.split_min) * 60.0:g})"]
@@ -1315,10 +1413,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     return out
 
 
-# ---- video splitter
 def split_plan(total, seg_secs):
-    """[(start, duration), ...] — leftover seconds are merged into the LAST part
-    (6:20 @ 2min -> 2:00, 2:00, 2:20 ; never a tiny 0:20 clip)."""
     total, seg = float(total), float(seg_secs)
     if seg <= 0 or total <= seg:
         return [(0.0, total)]
@@ -1332,11 +1427,6 @@ def split_plan(total, seg_secs):
 
 
 def split_video(src, out_prefix, seg_min=2.0, progress=None, reencode=False):
-    """Cut `src` into <out_prefix>_part01.mp4 ... Returns part paths (or [src] if no split).
-
-    Default is stream copy (instant). render_final forces a keyframe at every split boundary,
-    so the cuts are accurate. Pass reencode=True for videos that were NOT rendered by this
-    version (e.g. an old final.mp4)."""
     total = probe_duration(src)
     plan = split_plan(total, float(seg_min) * 60.0)
     if len(plan) <= 1:
@@ -1358,7 +1448,7 @@ def split_video(src, out_prefix, seg_min=2.0, progress=None, reencode=False):
     return outs
 
 
-# ---- preview (5-second scrubbable clip)
+# ---- preview
 _NEON_CACHE = {}
 
 
@@ -1610,13 +1700,10 @@ def _concat_audio(wd, n):
     return allwav
 
 
-# ---- final audio: loudness boost + optional BGM with sidechain ducking
 _AFMT = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
 
 def mix_audio(voice, wd, s, total):
-    """Voice loudnorm (+gain) and, if a BGM file is given, looping BGM that is ducked
-    (sidechaincompress) whenever the narrator speaks. Returns <wd>/mix.wav."""
     out = os.path.join(wd, "mix.wav")
     gain = f"loudnorm=I={s.loud_lufs:g}:TP=-1.5:LRA=11,volume={s.voice_db:g}dB"
     bgm = s.bgm if (s.bgm and os.path.isfile(s.bgm)) else ""
@@ -1646,7 +1733,7 @@ def mix_audio(voice, wd, s, total):
 
     try:
         run(graph(":normalize=0", ",alimiter=limit=0.97"))
-    except RuntimeError:      # ffmpeg < 4.4 has no amix normalize option
+    except RuntimeError:
         run(graph("", ",volume=2,alimiter=limit=0.97"))
     return out
 
@@ -1740,10 +1827,10 @@ SUP = argparse.SUPPRESS
 
 def add_style_args(p):
     g = p.add_argument_group("voice / language")
-    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de")
+    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en")
     g.add_argument("--voice", default=SUP, help="Edge voice name (e.g. my-MM-NilarNeural)")
     g.add_argument("--rate", type=int, default=SUP,
-                   help="Edge speed %% (-50..100) · default: my 45 / de 10")
+                   help="Edge speed %% (-50..100) · default: my 45 / de 10 / en 0")
     g.add_argument("--workers", dest="tts_workers", type=int, default=SUP, help="parallel TTS jobs")
     g = p.add_argument_group("audio mix")
     g.add_argument("--loud", dest="loud_lufs", type=float, default=SUP,
@@ -1916,6 +2003,25 @@ def cmd_preview(args):
     print(f"✅ {out}")
 
 
+def cmd_voice_test(args):
+    lang = args.lang
+    voice = args.voice or LANG_CONF[lang]["edge_voices"][0][0]
+    rate = args.rate if args.rate is not None else int(LANG_CONF[lang].get("rate", 0))
+    text = args.text or LANG_CONF[lang]["sample"]
+    out = args.output or os.path.join(os.getcwd(), f"voice_{lang}_{int(time.time())}.mp3")
+    tts_edge(text, voice, f"{int(rate):+d}%", out, os.environ.get("EDGE_TTS_PROXY") or None)
+    print(f"✅ {out}\n   voice={voice} · rate={int(rate):+d}%\n   text={text}")
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(out)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", out])
+        else:
+            subprocess.Popen(["xdg-open", out])
+    except Exception:
+        pass
+
+
 def cmd_run(args):
     args.dir = args.dir or os.path.join("work", "recap")
     proj = cmd_init(args)
@@ -1962,7 +2068,7 @@ def build_parser():
 
     a = sub.add_parser("transcribe", help="Whisper စာသားထုတ် + prompt.txt")
     a.add_argument("dir")
-    a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de")
+    a.add_argument("--lang", type=resolve_lang, default=None, help="target: my | de | en")
     add_whisper_args(a)
     a.set_defaults(fn=cmd_transcribe)
 
@@ -1991,6 +2097,14 @@ def build_parser():
     add_style_args(a)
     a.set_defaults(fn=cmd_preview)
 
+    a = sub.add_parser("voice-test", help="Voice တစ်ခုကို စမ်းနားထောင် (mp3 ထုတ်)")
+    a.add_argument("--lang", type=resolve_lang, default="my")
+    a.add_argument("--voice", help="Edge voice name (default: first of language)")
+    a.add_argument("--rate", type=int, default=None)
+    a.add_argument("--text", help="sample text (default: language sample)")
+    a.add_argument("-o", "--output", help="output mp3 path")
+    a.set_defaults(fn=cmd_voice_test)
+
     a = sub.add_parser("run", help="အစအဆုံး (translation မှာ တစ်ခါ ရပ်မယ်)")
     a.add_argument("source")
     a.add_argument("-d", "--dir", help="project folder (default work/recap)")
@@ -2001,13 +2115,13 @@ def build_parser():
     add_style_args(a)
     a.set_defaults(fn=cmd_run)
 
-    a = sub.add_parser("ui", help="Gradio web UI (dark mode)")
+    a = sub.add_parser("ui", help="Gradio web UI (dark mode + voice audition)")
     a.set_defaults(fn=cmd_ui)
     return p
 
 
 # ======================================================================
-# Web UI (Gradio) — DARK MODE ONLY   (loaded lazily so the CLI works without gradio)
+# Web UI (Gradio) — DARK MODE ONLY
 # ======================================================================
 def launch_ui():
     import gradio as gr
@@ -2015,7 +2129,7 @@ def launch_ui():
     BASE = os.path.join(os.getcwd(), "work_ui")
     os.makedirs(BASE, exist_ok=True)
     PORT = int(os.environ.get("PORT", "7860"))
-    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de"}
+    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en"}
 
     def voices_for(code):
         return [v for v, _ in LANG_CONF[code]["edge_voices"]]
@@ -2048,7 +2162,6 @@ def launch_ui():
         proj = init_project(pdir, source, int(height), os.environ.get("YT_COOKIES"), dl_prog)
         return pdir, proj
 
-    # ---------------- dark-only theme
     dark_head = """
 <script>
 (function () {
@@ -2067,7 +2180,7 @@ def launch_ui():
 </script>
 """
     ui_kw = {
-        "title": "Recap → Burmese / German",
+        "title": "Recap → Burmese / German / English",
         "theme": gr.themes.Base(primary_hue="indigo", secondary_hue="purple", neutral_hue="slate"),
         "css": ":root, html, body, gradio-app { color-scheme: dark; }"
                " body, gradio-app, .gradio-container { background: #0b0f19 !important; }",
@@ -2081,7 +2194,6 @@ def launch_ui():
     blocks_kw = {k: v for k, v in ui_kw.items() if k in bp}
     launch_kw = {k: v for k, v in ui_kw.items() if k not in bp}
 
-    # ---------------- fetch + preview
     FETCH = {}
 
     def start_fetch(url, upload, height):
@@ -2163,7 +2275,6 @@ def launch_ui():
         return (pdir, f"✅ Video ရပြီ ({mb:.1f} MB) · အောက်က Preview မှာ စာတန်း/Neon ချိန်ပြီး 1️⃣ နှိပ်ပါ",
                 img, gr.Timer(active=False))
 
-    # ---------------- step 1 (whisper)
     TRANS = {}
 
     def start_step1(url, upload, lang_name, model, src_lang, max_min, height):
@@ -2213,7 +2324,6 @@ def launch_ui():
         return (pdir, f"✅ 100% · {info} · Prompt {len(chunks)} ပိုင်း · {elapsed:.0f}s",
                 chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
 
-    # ---------------- step 2 (tts + render + split)
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
               height, fps, preset, max_speed, crop, flip, zoom,
@@ -2303,9 +2413,8 @@ def launch_ui():
         v = voices_for(code)
         return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
 
-    # ---------------- layout
     with gr.Blocks(**blocks_kw) as demo:
-        gr.Markdown(f"# 🎙️ Recap → Burmese / German  `v{__version__}`\n"
+        gr.Markdown(f"# 🎙️ Recap → Burmese / German / English  `v{__version__}`\n"
                     f"Whisper → Gemini (Recap mode · {CHUNK} ကြောင်းစီ · chat တစ်ခုတည်း) → Edge TTS → Smart Sync → စာတန်း + Neon → 🎵 BGM ducking → ✂️ အပိုင်းခွဲ (ON/OFF)")
         pdir_state = gr.State("")
 
@@ -2327,6 +2436,35 @@ def launch_ui():
                                  label="Edge speed % (ဘာသာစကားပြောင်းရင် အလိုအလျောက် ချိန်မယ်)")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
             lang.change(on_lang_change, lang, [voice, rate])
+
+            with gr.Group():
+                gr.Markdown("**🎧 အသံစမ်းနားထောင်ရန်** — ရွေးထားတဲ့ voice + speed နဲ့ နမူနာ ဖတ်ပြမယ်")
+                with gr.Row():
+                    audition_text = gr.Textbox(
+                        label="စမ်းဖတ်မယ့် စာသား (optional · ဗလာထားရင် ဘာသာစကားရဲ့ default sample)",
+                        lines=2, max_lines=3, scale=4)
+                    audition_btn = gr.Button("▶️ နားထောင်မယ်", variant="secondary", scale=1)
+                audition_audio = gr.Audio(label="နမူနာ အသံ", type="filepath",
+                                          interactive=False, autoplay=True)
+                audition_status = gr.Markdown()
+
+                def _audition(lang_name, v, r, txt):
+                    code = LANGS[lang_name]
+                    if not v:
+                        return None, "⚠️ voice မရွေးရသေးပါ"
+                    try:
+                        path = voice_sample(v, code, int(r), txt)
+                        return path, f"✅ `{v}` · speed `{int(r):+d}%`"
+                    except Exception as ex:
+                        return None, f"❌ {str(ex)[:300]}"
+
+                audition_btn.click(_audition, [lang, voice, rate, audition_text],
+                                   [audition_audio, audition_status],
+                                   show_progress="minimal")
+                for c in (voice, rate):
+                    c.change(_audition, [lang, voice, rate, audition_text],
+                             [audition_audio, audition_status],
+                             show_progress="hidden", queue=True)
 
         with gr.Accordion("🎵 Background music + Voice အသံ", open=False):
             bgm_file = gr.File(label="🎵 Background music (optional · mp3/wav/m4a/ogg)",
@@ -2444,7 +2582,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    # no arguments -> web UI (same behaviour as before); otherwise CLI
     if len(sys.argv) == 1:
         launch_ui()
     else:
