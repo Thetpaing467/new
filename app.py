@@ -1,14 +1,12 @@
 """Recap CLI (slim): Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render.
 
-Languages: Burmese (my) / German (de) / English (en)   ·   Sources: YouTube / TikTok (yt-dlp), Rednote, local file
+Languages: Burmese (my) / German (de) / English (en)
+Sources: YouTube / TikTok (yt-dlp), Rednote, local file
 
-Usage: python recap.py run <video|url> -d work/ep1 --lang my
-       python recap.py run <video|url> -d work/ep1 --lang de
-       python recap.py run <video|url> -d work/ep1 --lang en
-       python recap.py run <video|url> -d work/ep1 --lang en --mirror-every 5
-       python recap.py ui            (Gradio web UI, dark mode)
+Usage: python recap.py run <video|url> -d work/ep1 --lang my --pitch 6
+       python recap.py ui
 """
-__version__ = "1.25.0"
+__version__ = "1.26.0"
 
 import argparse
 import asyncio
@@ -63,6 +61,33 @@ TRIM_GAPLESS = (
 )
 TRIM_DE = TRIM_GAPLESS
 TRIM_EN = TRIM_GAPLESS
+
+# ---------- Pitch filter helper ----------
+_HAS_RB = None
+
+
+def has_rubberband():
+    global _HAS_RB
+    if _HAS_RB is None:
+        try:
+            r = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True)
+            _HAS_RB = "rubberband" in r.stdout
+        except Exception:
+            _HAS_RB = False
+    return _HAS_RB
+
+
+def pitch_filter(semitones):
+    """Semitone → ffmpeg pitch filter. rubberband ရှိရင် သုံး၊ မရှိရင် asetrate."""
+    if not semitones or abs(float(semitones)) < 0.01:
+        return ""
+    factor = 2 ** (float(semitones) / 12.0)
+    if has_rubberband():
+        return f"rubberband=pitch={factor:.6f}"
+    return (f"asetrate=44100*{factor:.6f},"
+            f"aresample=44100,"
+            f"atempo={1/factor:.6f}")
+
 
 _HUMAN = (
     "VOICE STYLE (very important): the result will be read aloud by a speech engine, so it must "
@@ -419,6 +444,7 @@ class Settings:
     tts_workers: int = 8
     loud_lufs: float = -14.0
     voice_db: float = 0.0
+    pitch: float = 0.0          # ⬅️ အသစ် (semitone) +6 = ကလေးဆန်
     bgm: str = ""
     bgm_vol: float = 0.25
     duck: bool = True
@@ -804,8 +830,8 @@ def blend_overlay(fr, ov, p=None):
 # ======================================================================
 class Neon:
     BASE = np.array([12, 8, 10], np.float32)
-    CYAN = np.array([255, 255, 0], np.float32)     # BGR cyan
-    MAGENTA = np.array([110, 30, 255], np.float32)  # BGR magenta
+    CYAN = np.array([255, 255, 0], np.float32)
+    MAGENTA = np.array([110, 30, 255], np.float32)
     IDLE = 0.14
     NBINS = 2048
 
@@ -1713,7 +1739,13 @@ def _synthesize(proj, my_list, s, progress, proxy):
     n = len(my_list)
     voice = s.resolved_voice()
     trim_filter = LANG_CONF[s.lang].get("trim", TRIM)
-    sig_base = f"edge|{voice}|{s.rate_str()}|noref|{trim_filter}"
+
+    # ⬇️ pitch filter ပေါင်းထည့်
+    pf = pitch_filter(getattr(s, "pitch", 0.0))
+    if pf:
+        trim_filter = pf + "," + trim_filter
+
+    sig_base = f"edge|{voice}|{s.rate_str()}|p{s.pitch}|noref|{trim_filter}"
 
     def do_line(i):
         wav = os.path.join(wd, f"a{i:04d}.wav")
@@ -1897,6 +1929,8 @@ def add_style_args(p):
     g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en")
     g.add_argument("--voice", default=SUP)
     g.add_argument("--rate", type=int, default=SUP)
+    g.add_argument("--pitch", type=float, default=SUP,
+                   help="Pitch semitone · +6 = ကလေးဆန် · -3 = ထူထဲ")
     g.add_argument("--workers", dest="tts_workers", type=int, default=SUP)
     g = p.add_argument_group("audio mix")
     g.add_argument("--loud", dest="loud_lufs", type=float, default=SUP)
@@ -1965,6 +1999,7 @@ def settings_for(proj, args):
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
+    s.pitch = max(-12.0, min(12.0, float(getattr(s, "pitch", 0.0))))
     s.loud_lufs = max(-24.0, min(-8.0, float(s.loud_lufs)))
     s.render_workers = max(0, min(16, int(s.render_workers)))
     if s.mirror_every is None:
@@ -2133,8 +2168,7 @@ def cmd_ui(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="recap.py",
-                                description="Recap video dubber")
+    p = argparse.ArgumentParser(prog="recap.py", description="Recap video dubber")
     p.add_argument("--version", action="version", version=f"recap-cli {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("init"); a.add_argument("source")
@@ -2163,7 +2197,7 @@ def build_parser():
 
 
 # ======================================================================
-# Web UI (Gradio) — DARK MODE ONLY
+# Web UI (Gradio) — DARK MODE · URL only (no upload)
 # ======================================================================
 def launch_ui():
     import gradio as gr
@@ -2184,18 +2218,18 @@ def launch_ui():
     def _cb(progress):
         return lambda frac, label=None: progress(frac, desc=label or "")
 
-    def _source(url, upload):
-        return _path(upload) or extract_url(url or "")
+    def _source(url):
+        return extract_url(url or "")
 
     def _pbar(frac, width=20):
         frac = max(0.0, min(float(frac), 1.0))
         fill = int(width * frac)
         return "█" * fill + "░" * (width - fill)
 
-    def _ensure_video(url, upload, height, cb):
-        source = _source(url, upload)
+    def _ensure_video(url, height, cb):
+        source = _source(url)
         if not source:
-            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+            raise gr.Error("Video link ထည့်ပါ")
         key = source
         if os.path.isfile(source):
             key += f"|{os.path.getsize(source)}"
@@ -2239,9 +2273,9 @@ def launch_ui():
 
     FETCH = {}
 
-    def start_fetch(url, upload, height):
-        if not _source(url, upload):
-            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+    def start_fetch(url, height):
+        if not _source(url):
+            raise gr.Error("Video link ထည့်ပါ")
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None,
               "done": False, "t0": time.time()}
@@ -2254,7 +2288,7 @@ def launch_ui():
 
         def work():
             try:
-                st["res"] = _ensure_video(url, upload, height, cb)
+                st["res"] = _ensure_video(url, height, cb)
             except BaseException as ex:
                 st["err"] = ex
             finally:
@@ -2319,9 +2353,9 @@ def launch_ui():
 
     TRANS = {}
 
-    def start_step1(url, upload, lang_name, model, src_lang, max_min, height):
-        if not _source(url, upload):
-            raise gr.Error("Video link ထည့်ပါ (သို့) ဖိုင်တင်ပါ")
+    def start_step1(url, lang_name, model, src_lang, max_min, height):
+        if not _source(url):
+            raise gr.Error("Video link ထည့်ပါ")
         code = LANGS[lang_name]
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "စတင်နေတယ်...", "res": None, "err": None,
@@ -2336,7 +2370,7 @@ def launch_ui():
         def work():
             try:
                 cb(0.0, "Video ယူနေတယ်...")
-                pdir, proj = _ensure_video(url, upload, height, lambda f, l=None: cb(f * 0.2, l))
+                pdir, proj = _ensure_video(url, height, lambda f, l=None: cb(f * 0.2, l))
                 tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
                 info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
                 st["res"] = (pdir, info, build_prompt_chunks(proj.units, code))
@@ -2366,7 +2400,7 @@ def launch_ui():
         return (pdir, f"✅ 100% · {info} · Prompt {len(chunks)} ပိုင်း · {elapsed:.0f}s",
                 chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
 
-    def step2(pdir, translated, parts, lang_name, voice, rate, workers,
+    def step2(pdir, translated, parts, lang_name, voice, rate, pitch, workers,
               height, fps, preset, max_speed,
               flip, mirror_every, zoom,
               sub, sub_size, sub_pos, sweep, rworkers,
@@ -2386,13 +2420,13 @@ def launch_ui():
             s.lang = code
             s.voice = voice if voice in voices_for(code) else ""
             s.rate, s.tts_workers = int(rate), int(workers)
+            s.pitch = float(pitch)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.flip, s.zoom = float(max_speed), bool(flip), float(zoom)
             s.mirror_every = float(mirror_every)
             s.render_workers = int(rworkers)
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
-            # Neon: force ON (defaults)
             s.neon = True
             s.neon_th = 3
             s.neon_speed = 0.15
@@ -2456,14 +2490,14 @@ def launch_ui():
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="Edge speed %")
+                pitch = gr.Slider(-12, 12, value=0, step=1,
+                                   label="🎵 Pitch (semitone) · +6 = ကလေးဆန် · 0 = မူရင်း")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
             lang.change(on_lang_change, lang, [voice, rate])
 
-        gr.Markdown("### 📥 Video")
+        gr.Markdown("### 📥 Video URL")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
                          placeholder="https://...")
-        upload = gr.File(label="(သို့) Video ဖိုင်တင်", type="filepath",
-                         file_types=[".mp4", ".mov", ".mkv", ".webm", ".m4v"])
         b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
         status_fetch = gr.Markdown()
 
@@ -2489,8 +2523,8 @@ def launch_ui():
                  sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
-        for trig in (url.submit, b_fetch.click, upload.upload):
-            trig(start_fetch, [url, upload, height], [fetch_job, status_fetch, fetch_timer])
+        for trig in (url.submit, b_fetch.click):
+            trig(start_fetch, [url, height], [fetch_job, status_fetch, fetch_timer])
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, gr.State(), fetch_timer],
                          show_progress="hidden")
@@ -2529,12 +2563,12 @@ def launch_ui():
         dl = gr.File(label="⬇️ Download MP4", file_count="multiple")
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-        b1.click(start_step1, [url, upload, lang, model, src_lang, max_min, height],
+        b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
                  [trans_job, status1, trans_timer, b1])
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
-        b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
+        b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, pitch, workers,
                          height, fps, preset, max_speed,
                          flip, mirror_every, zoom,
                          sub, sub_size, sub_pos, sweep, rworkers],
