@@ -9,7 +9,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.27.0"
+__version__ = "1.27.1"
 
 import argparse
 import asyncio
@@ -343,7 +343,6 @@ _STORY_ES = (
     "a traducción, a libro de texto o a robot, reescríbela como la diría un español de verdad. "
 )
 
-
 def _tail(script, accent, story):
     return (
         _RECAP_MODE
@@ -353,7 +352,6 @@ def _tail(script, accent, story):
         "-- same numbers, same count, no extra comments, no headings, no blank lines, "
         "no language label.\n\n"
     )
-
 
 LANG_CONF = {
     "my": {
@@ -487,7 +485,6 @@ LANG_CONF = {
 LANG_ALIASES = {c["label"]: k for k, c in LANG_CONF.items()}
 LANG_ALIASES.update({c["name"].lower(): k for k, c in LANG_CONF.items()})
 
-
 def resolve_lang(value):
     v = (value or "my").strip()
     if v in LANG_CONF:
@@ -497,7 +494,6 @@ def resolve_lang(value):
     if v.lower() in LANG_ALIASES:
         return LANG_ALIASES[v.lower()]
     raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de / en / es)")
-
 
 @dataclass
 class Settings:
@@ -557,7 +553,6 @@ class Settings:
             return bool(self.flip)
         return (int(t // self.mirror_every) % 2 == 0)
 
-
 # ======================================================================
 # utils
 # ======================================================================
@@ -567,29 +562,23 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-1200:])
     return r.stdout
 
-
 def probe_duration(path):
     return float(sh(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                      "-of", "csv=p=0", path]).strip())
-
 
 def wav_dur(path):
     with wave.open(path) as w:
         return w.getnframes() / float(w.getframerate())
 
-
 def fmt_t(sec):
     sec = float(sec)
     return f"{sec:.1f}s" if sec < 60 else f"{int(sec // 60)}m {sec % 60:.0f}s"
 
-
 def clean_text(text, lang="my"):
     return re.sub(LANG_CONF[lang]["clean"], "", text).strip()
 
-
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
-
 
 class Progress:
     def __init__(self, lo=0.0, hi=1.0, parent=None, quiet=False):
@@ -624,17 +613,14 @@ class Progress:
             sys.stderr.write("\n")
             sys.stderr.flush()
 
-
 def timing_table(d):
     w = max(len(k) for k in d) if d else 10
     return "\n".join(f"  {k.ljust(w)}  {fmt_t(v)}" for k, v in d.items())
-
 
 # ======================================================================
 # fonts
 # ======================================================================
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-
 
 def _prefer_regular(paths):
     def score(p):
@@ -647,14 +633,12 @@ def _prefer_regular(paths):
         return (s, len(b))
     return sorted(paths, key=score)
 
-
 def _globs(base):
     out = []
     for ext in ("ttf", "otf", "ttc"):
         out += glob.glob(os.path.join(base, f"*.{ext}"))
         out += glob.glob(os.path.join(base, "fonts", f"*.{ext}"))
     return out
-
 
 def find_font(lang="my", explicit=""):
     conf = LANG_CONF[lang]
@@ -693,16 +677,13 @@ def find_font(lang="my", explicit=""):
         return repo[0]
     return None
 
-
 def has_raqm():
     try:
         return bool(features.check("raqm"))
     except Exception:
         return False
 
-
 _FONT_CACHE = {}
-
 
 def get_font(path, size, layout="raqm"):
     key = (path, size, layout)
@@ -718,10 +699,8 @@ def get_font(path, size, layout="raqm"):
                 _FONT_CACHE[key] = ImageFont.load_default()
     return _FONT_CACHE[key]
 
-
 def _is_start(c):
     return (0x1000 <= c <= 0x1021) or (0x1023 <= c <= 0x1027) or c in (0x1029, 0x102A, 0x103F)
-
 
 def split_syll(word):
     idx = [0]
@@ -738,7 +717,6 @@ def split_syll(word):
     idx.append(n)
     return [word[idx[k]:idx[k + 1]] for k in range(len(idx) - 1)]
 
-
 def wrap_text(text, font, maxw, is_mm=False):
     lines, cur = [], ""
     for word in text.split():
@@ -754,7 +732,6 @@ def wrap_text(text, font, maxw, is_mm=False):
     if cur:
         lines.append(cur)
     return lines
-
 
 def split_for_sub(text, mc=36, lang="my"):
     conf = LANG_CONF[lang]
@@ -779,7 +756,6 @@ def split_for_sub(text, mc=36, lang="my"):
             parts.append(cur)
     return parts or [text]
 
-
 # ======================================================================
 # overlay (DO NOT TOUCH — blur effect preserved exactly)
 # ======================================================================
@@ -787,7 +763,6 @@ SWEEP_TRAIL = np.array([185, 232, 255], np.float32)
 SWEEP_BAND = np.array([235, 255, 255], np.float32)
 GLASS_TINT = np.array([86, 104, 124], np.float32)
 GOLD = (255, 214, 40)
-
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
                   layout="raqm", is_mm=True):
@@ -846,9 +821,7 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
             "inv": 1.0 - a, "pre": bgr * a, "tm": tm,
             "xs": np.arange(bw, dtype=np.float32)[None, :, None]}
 
-
 _BLUR_DOWN = 4
-
 
 def blend_overlay(fr, ov, p=None):
     y0, y1, x0, x1 = ov["y0"], ov["y1"], ov["x0"], ov["x1"]
@@ -878,7 +851,6 @@ def blend_overlay(fr, ov, p=None):
         reg = reg * (1.0 - k_band) + SWEEP_BAND * k_band
         reg += band * (1.0 - ov["inv"]) * 22.0
     fr[y0:y1, x0:x1] = np.clip(reg, 0, 255).astype(np.uint8)
-
 
 class Neon:
     BASE = np.array([12, 8, 10], np.float32)
@@ -918,9 +890,7 @@ class Neon:
         strip = np.clip(c, 0, 255).astype(np.uint8)
         fr[self.ys, self.xs] = strip[self.idx]
 
-
 _NEON_CACHE = {}
-
 
 def _neon_for(W, H, th, speed):
     key = (W, H, int(th), float(speed))
@@ -929,7 +899,6 @@ def _neon_for(W, H, th, speed):
             _NEON_CACHE.clear()
         _NEON_CACHE[key] = Neon(W, H, th, speed)
     return _NEON_CACHE[key]
-
 
 def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR):
     x, y, w, h = rect
@@ -942,12 +911,10 @@ def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR):
         f = cv2.flip(f, 1)
     return f
 
-
 def out_size(rect, height):
     H = int(height) // 2 * 2
     W = int(round(rect[2] * H / rect[3] / 2)) * 2
     return W, H
-
 
 # ======================================================================
 # crop helpers
@@ -961,14 +928,12 @@ def resolve_crop(src_w, src_h, s, auto=None):
         return (cx, cy, cw, ch)
     return (0, 0, src_w, src_h)
 
-
 def zoom_rect(rect, zoom):
     x, y, w, h = rect
     if zoom <= 1.001:
         return rect
     nw, nh = max(2, int(w / zoom) // 2 * 2), max(2, int(h / zoom) // 2 * 2)
     return (x + (w - nw) // 2, y + (h - nh) // 2, nw, nh)
-
 
 def zoom_flip(fr, zoom, flip):
     zoomed = zoom > 1.001
@@ -981,14 +946,12 @@ def zoom_flip(fr, zoom, flip):
         return cv2.flip(fr, 1)
     return fr if zoomed else fr.copy()
 
-
 # ======================================================================
 # download
 # ======================================================================
 _RED_HOSTS = ("xhslink.com", "xiaohongshu.com", "rednote.com", "xhs.cn")
 _RED_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
            "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
-
 
 def extract_url(text):
     text = (text or "").strip()
@@ -997,11 +960,9 @@ def extract_url(text):
     m = re.search(r"https?://[^\s\"'<>，。！）)]+", text)
     return m.group(0).rstrip(".,;:!?") if m else text
 
-
 def _is_rednote(host):
     host = host.lower()
     return any(host == h or host.endswith("." + h) for h in _RED_HOSTS)
-
 
 def _walk(o, out):
     if isinstance(o, dict):
@@ -1017,7 +978,6 @@ def _walk(o, out):
     elif isinstance(o, list):
         for v in o:
             _walk(v, out)
-
 
 def _red_video_urls(html):
     urls = []
@@ -1044,7 +1004,6 @@ def _red_video_urls(html):
             clean.append(u)
     return clean
 
-
 def _dl_direct(url, out, progress=None, headers=None):
     import requests
     with requests.get(url, stream=True, timeout=30, allow_redirects=True,
@@ -1064,7 +1023,6 @@ def _dl_direct(url, out, progress=None, headers=None):
         raise RuntimeError("ဖိုင် မရပါ")
     return out
 
-
 def _dl_rednote(url, out, progress=None):
     import requests
     hdr = {"User-Agent": _RED_UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -1081,7 +1039,6 @@ def _dl_rednote(url, out, progress=None):
         except Exception as ex:
             last = ex
     raise RuntimeError(f"Rednote video ဖိုင် ဆွဲမရပါ: {str(last)[:200]}")
-
 
 def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
     import yt_dlp
@@ -1112,7 +1069,6 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
         raise RuntimeError("yt-dlp ဖိုင် မထွက်ပါ")
     return max(files, key=os.path.getsize)
 
-
 def ensure_mp4(raw, final, height):
     try:
         codec = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -1131,7 +1087,6 @@ def ensure_mp4(raw, final, height):
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", final])
     return final
-
 
 def fetch_video(source, final, height=720, progress=None, cookies_file=None):
     source = extract_url(source)
@@ -1165,12 +1120,10 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-
 # ======================================================================
 # transcribe
 # ======================================================================
 _MODELS = {}
-
 
 def get_model(size):
     if size not in _MODELS:
@@ -1178,7 +1131,6 @@ def get_model(size):
         _MODELS[size] = WhisperModel(size, device="cpu", compute_type="int8",
                                      cpu_threads=os.cpu_count() or 4)
     return _MODELS[size]
-
 
 def _run(wm, audio, lang, fast, vdur, progress):
     raw = []
@@ -1204,7 +1156,6 @@ def _run(wm, audio, lang, fast, vdur, progress):
         progress(min(s.end / vdur, 1.0))
     return raw, info
 
-
 def merge_segments(raw):
     units = []
     for s, e, t in raw:
@@ -1213,7 +1164,6 @@ def merge_segments(raw):
         else:
             units.append((s, e, t))
     return units
-
 
 def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=True,
                      max_min=0, progress=None):
@@ -1241,14 +1191,12 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
             f"အပိုင်း {len(units)} ခု")
     return ([{"start": u[0], "end": u[1], "src": u[2], "my": ""} for u in units], vdur, text)
 
-
 # ======================================================================
 # translate
 # ======================================================================
 def build_prompt(units, lang="my"):
     lines = "\n".join(f"[{i}] {u['src']}" for i, u in enumerate(units))
     return LANG_CONF[lang]["prompt"] + lines
-
 
 def build_prompt_chunks(units, lang="my", size=CHUNK):
     conf = LANG_CONF[lang]
@@ -1263,7 +1211,6 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
         out.append({"lo": lo, "hi": hi, "text": head + note + lines})
     return out
 
-
 def parse_numbered(text, n):
     got = {}
     for line in text.splitlines():
@@ -1277,12 +1224,10 @@ def parse_numbered(text, n):
             got = {i: plain[i] for i in range(n)}
     return got
 
-
 def check_part(text, lo, hi):
     got = {i: t for i, t in parse_numbered(text or "", hi).items() if i >= lo}
     missing = [i for i in range(lo, hi) if i not in got]
     return got, missing
-
 
 # ======================================================================
 # tts
@@ -1296,7 +1241,6 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
 
     asyncio.run(run())
 
-
 # ======================================================================
 # render
 # ======================================================================
@@ -1308,7 +1252,6 @@ def detect_crop(src):
     if not m:
         return None
     return tuple(int(x) for x in m[-1])
-
 
 def prepare_video(src, dst, target_h, crop=True):
     target_h = int(target_h) // 2 * 2
@@ -1332,7 +1275,6 @@ def prepare_video(src, dst, target_h, crop=True):
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     return W, H
-
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
@@ -1566,7 +1508,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         progress(1.0, "Video render")
     return out
 
-
 # ---- splitter
 def split_plan(total, seg_secs):
     total, seg = float(total), float(seg_secs)
@@ -1579,7 +1520,6 @@ def split_plan(total, seg_secs):
         end = total if i == n - 1 else starts[i + 1]
         plan.append((st, end - st))
     return plan
-
 
 def split_video(src, out_prefix, seg_min=2.0, progress=None):
     total = probe_duration(src)
@@ -1596,7 +1536,6 @@ def split_video(src, out_prefix, seg_min=2.0, progress=None):
         if progress:
             progress((k + 1) / n, f"အပိုင်းခွဲနေတယ် {k + 1}/{n}")
     return outs
-
 
 # ---- preview
 def _preview_clip(src, clip_path, height, crop):
@@ -1625,7 +1564,6 @@ def _preview_clip(src, clip_path, height, crop):
                     pass
     return clip_path
 
-
 def _preview_frame_at(src, cache_dir, height, crop, t):
     key = f"pv_clip_{os.path.getsize(src)}_{int(height)}_{int(bool(crop))}.mp4"
     clip = _preview_clip(src, os.path.join(cache_dir, key), height, crop)
@@ -1648,7 +1586,6 @@ def _preview_frame_at(src, cache_dir, height, crop, t):
         raise RuntimeError("preview frame မရပါ")
     return fr
 
-
 def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     cache_dir = os.path.dirname(os.path.abspath(out_png))
     t = max(0.0, min(float(t), PREVIEW_SECS))
@@ -1665,7 +1602,6 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
             blend_overlay(fr, ov, (t / PREVIEW_SECS) if s.sub_sweep else None)
     cv2.imwrite(out_png, fr)
     return out_png
-
 
 # ======================================================================
 # project
@@ -1729,7 +1665,6 @@ class Project:
     def update_settings(self, s):
         self.data["settings"] = s.to_dict()
 
-
 # ======================================================================
 # pipeline
 # ======================================================================
@@ -1742,7 +1677,6 @@ def init_project(path, source, height=720, cookies_file=None, progress=None):
     proj.data["source"] = source
     proj.save()
     return proj
-
 
 def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, lang="my",
                    progress=None):
@@ -1760,7 +1694,6 @@ def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, la
     write_prompt(proj, lang)
     return info
 
-
 def write_prompt(proj, lang):
     with open(proj.prompt_file, "w", encoding="utf-8") as f:
         f.write(build_prompt(proj.units, lang))
@@ -1768,7 +1701,6 @@ def write_prompt(proj, lang):
         with open(os.path.join(proj.path, f"prompt_part{k + 1:02d}.txt"), "w", encoding="utf-8") as f:
             f.write(c["text"])
     return proj.prompt_file
-
 
 def apply_translation(proj, text, lang):
     units = proj.units
@@ -1778,7 +1710,6 @@ def apply_translation(proj, text, lang):
     missing = [i for i in range(len(units)) if not units[i]["my"]]
     proj.save()
     return len(got), missing
-
 
 def _synthesize(proj, my_list, s, progress, proxy):
     wd = proj.path
@@ -1830,7 +1761,6 @@ def _synthesize(proj, my_list, s, progress, proxy):
             raise
     return durs
 
-
 def _concat_audio(wd, n):
     lst = os.path.join(wd, "alist.txt")
     with open(lst, "w") as f:
@@ -1840,9 +1770,7 @@ def _concat_audio(wd, n):
     sh(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", allwav])
     return allwav
 
-
 _AFMT = "aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo"
-
 
 def mix_audio(voice, wd, s, total):
     out = os.path.join(wd, "mix.wav")
@@ -1876,7 +1804,6 @@ def mix_audio(voice, wd, s, total):
         run(graph("", ",volume=2,alimiter=limit=0.97"))
     return out
 
-
 def _build_plan(units, durs, vdur, max_speed):
     n = len(units)
     bounds = [0.0] + [(units[i]["end"] + units[i + 1]["start"]) / 2
@@ -1891,7 +1818,6 @@ def _build_plan(units, durs, vdur, max_speed):
         cum += d
     return plan, cum
 
-
 def _build_subs(my_list, durs, lang):
     subs, t0 = [], 0.0
     for i, text in enumerate(my_list):
@@ -1904,7 +1830,6 @@ def _build_subs(my_list, durs, lang):
             cur += dd
         t0 += durs[i]
     return subs
-
 
 def run_render(proj, s, proxy=None, progress=None):
     progress = progress or Progress()
@@ -1948,12 +1873,10 @@ def run_render(proj, s, proxy=None, progress=None):
     proj.save()
     return {"final": proj.final, "new_dur": total, "old_dur": vdur, "timings": T}
 
-
 # ======================================================================
 # cli
 # ======================================================================
 SUP = argparse.SUPPRESS
-
 
 def add_style_args(p):
     g = p.add_argument_group("voice / language")
@@ -1990,7 +1913,6 @@ def add_style_args(p):
     g.add_argument("--neon-th", type=int, default=SUP)
     g.add_argument("--neon-speed", type=float, default=SUP)
 
-
 def add_whisper_args(p):
     g = p.add_argument_group("whisper")
     g.add_argument("--model", choices=["tiny", "base", "small"], default="base")
@@ -1998,7 +1920,6 @@ def add_whisper_args(p):
                    help="auto | en | zh | ko | ja | hi | th | vi | id | es | fr | de | ru | ...")
     g.add_argument("--no-batch", action="store_true")
     g.add_argument("--max-min", type=int, default=0)
-
 
 def settings_for(proj, args):
     s = proj.settings
@@ -2026,10 +1947,8 @@ def settings_for(proj, args):
             s.voice = ""
     return s
 
-
 def _cookies(args):
     return getattr(args, "cookies", None) or os.environ.get("YT_COOKIES") or None
-
 
 def cmd_init(args):
     prog = Progress()
@@ -2037,7 +1956,6 @@ def cmd_init(args):
     prog.done()
     print(f"✅ Project: {proj.path}\n   video: {proj.video}")
     return proj
-
 
 def cmd_transcribe(args, proj=None):
     proj = proj or Project.load(args.dir)
@@ -2049,7 +1967,6 @@ def cmd_transcribe(args, proj=None):
     nparts = len(build_prompt_chunks(proj.units, lang))
     print(f"✅ {info}\n   Prompt: {proj.prompt_file}  (+ prompt_part01..{nparts:02d}.txt)")
     return proj
-
 
 def cmd_prompt(args):
     proj = Project.load(args.dir)
@@ -2063,7 +1980,6 @@ def cmd_prompt(args):
         print(open(path, encoding="utf-8").read())
     else:
         print(f"✅ {path}")
-
 
 def cmd_apply(args, proj=None, file=None):
     proj = proj or Project.load(args.dir)
@@ -2080,7 +1996,6 @@ def cmd_apply(args, proj=None, file=None):
     print(f"✅ ဖြည့်ပြီး {got}/{len(proj.units)} ကြောင်း"
           + (f" · မပါသေးတာ: {missing[:15]}" if missing else ""))
     return not missing
-
 
 def cmd_render(args, proj=None):
     proj = proj or Project.load(args.dir)
@@ -2111,7 +2026,6 @@ def cmd_render(args, proj=None):
     t = {**{"transcribe": proj.data["timings"].get("transcribe", 0)}, **res["timings"]}
     print("⏱️\n" + timing_table({k: v for k, v in t.items() if v}))
 
-
 def cmd_preview(args):
     proj = Project.load(args.dir)
     s = settings_for(proj, args)
@@ -2120,7 +2034,6 @@ def cmd_preview(args):
     make_preview_frame(proj.video, out, s, LANG_CONF[s.lang]["sample"], font,
                        LANG_CONF[s.lang]["is_mm"], getattr(args, "at", 0.0) or 0.0)
     print(f"✅ {out}")
-
 
 def cmd_run(args):
     args.dir = args.dir or os.path.join("work", "recap")
@@ -2144,10 +2057,8 @@ def cmd_run(args):
         sys.exit("❌ စာကြောင်း မပြည့်သေးပါ")
     cmd_render(args, proj)
 
-
 def cmd_ui(args):
     launch_ui()
-
 
 def build_parser():
     p = argparse.ArgumentParser(prog="recap.py",
@@ -2178,7 +2089,6 @@ def build_parser():
     a = sub.add_parser("ui"); a.set_defaults(fn=cmd_ui)
     return p
 
-
 # ======================================================================
 # Web UI (Gradio) — DARK MODE ONLY
 # ======================================================================
@@ -2195,6 +2105,12 @@ def launch_ui():
 
     def _cb(progress):
         return lambda frac, label=None: progress(frac, desc=label or "")
+
+    # ✅ ဒီ function ကို ပြန်ထည့်ထားပါတယ်
+    def _path(f):
+        if not f:
+            return ""
+        return f if isinstance(f, str) else getattr(f, "name", "")
 
     def _source(url):
         return extract_url(url or "")
@@ -2403,11 +2319,13 @@ def launch_ui():
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
+            
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
             s.render_workers = 4        # 4 parallel
             s.split = True
             s.split_min = 2.0           # 2 min per part
+            
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
             # Neon: always ON with defaults
@@ -2584,7 +2502,6 @@ def launch_ui():
     lk = {k: v for k, v in launch_kw.items() if k in ok}
     demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True, **lk)
 
-
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == "run" and not hasattr(args, "height"):
@@ -2595,7 +2512,6 @@ def main(argv=None):
         sys.exit("\n⛔ ရပ်လိုက်ပါပြီ")
     except Exception as ex:
         sys.exit(f"\n❌ {ex}")
-
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
