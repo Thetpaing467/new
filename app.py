@@ -9,7 +9,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.27.1"
+__version__ = "1.27.2"
 
 import argparse
 import asyncio
@@ -1328,14 +1328,19 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         edges = raw_edges
 
     nw = len(edges) - 1
+    # FIX: chunk အရေအတွက် (nw) က mirror_every ကြောင့် ရာနဲ့ချီနိုင်တယ်၊
+    # တစ်ပြိုင်နက် run မယ့် worker ကို render_workers နဲ့ ကန့်သတ်မယ်
+    conc = max(1, min(nw, target_workers))
     counts = [0] * nw
-    per_threads = max(1, cpu // max(1, nw))
+    per_threads = max(1, cpu // conc)
     wd = os.path.dirname(os.path.abspath(out))
     tag = uuid.uuid4().hex[:6]
     parts = [os.path.join(wd, f"_part{tag}_{i:03d}.mp4") for i in range(nw)]
     abort = threading.Event()
 
     def worker(pi):
+        if abort.is_set():
+            return
         j0, j1 = edges[pi], edges[pi + 1]
         cap_ = cv2.VideoCapture(src)
         q = queue.Queue(maxsize=48)
@@ -1473,7 +1478,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
 
     lst = os.path.join(wd, f"_parts{tag}.txt")
     try:
-        with ThreadPoolExecutor(max_workers=nw) as pool:
+        with ThreadPoolExecutor(max_workers=conc) as pool:
             futs = [pool.submit(worker, i) for i in range(nw)]
             while not all(f.done() for f in futs):
                 time.sleep(0.25)
@@ -1483,6 +1488,8 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                     abort.set()
             for f in futs:
                 f.result()
+        if abort.is_set():
+            raise RuntimeError("render ရပ်သွားတယ် (chunk error)")
         if progress:
             progress(0.96, "Video + အသံ ပေါင်းနေတယ်")
         with open(lst, "w") as fh:
@@ -2106,7 +2113,6 @@ def launch_ui():
     def _cb(progress):
         return lambda frac, label=None: progress(frac, desc=label or "")
 
-    # ✅ ဒီ function ကို ပြန်ထည့်ထားပါတယ်
     def _path(f):
         if not f:
             return ""
@@ -2319,19 +2325,28 @@ def launch_ui():
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
-            
+
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
             s.render_workers = 4        # 4 parallel
             s.split = True
             s.split_min = 2.0           # 2 min per part
-            
+
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
             # Neon: always ON with defaults
             s.neon = True
             s.neon_th = 3
             s.neon_speed = 0.15
+
+            # FIX: အရင် run ရဲ့ final_*.mp4 (နဲ့ _partNN) ဖိုင်တွေကို render မလုပ်ခင် ရှင်းမယ်။
+            # အရင်ကတော့ render ပြီးမှ ရှင်းလို့ အခုခွဲထားတဲ့ part ဖိုင်တွေပါ ပျက်သွားတာ။
+            for old in glob.glob(os.path.join(pdir, "final_*.mp4")):
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+
             prog = Progress(0.0, 1.0, parent=_cb(progress))
             res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None, prog)
 
@@ -2348,18 +2363,13 @@ def launch_ui():
                     split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း: "
                                   + " · ".join(f"P{k + 1} {fmt_t(d)}" for k, d in enumerate(durs)))
                 else:
-                    split_note = f"\n\n✂️ {s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ"
+                    split_note = (f"\n\n✂️ {2 * s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ "
+                                  f"(ခွဲမယ့် အပိုင်းက {s.split_min:g} မိနစ်စီ)")
         except gr.Error:
             raise
         except Exception as ex:
             raise gr.Error(str(ex)[:600])
 
-        for old in glob.glob(os.path.join(pdir, "final_*.mp4")):
-            if old != out:
-                try:
-                    os.remove(old)
-                except OSError:
-                    pass
         mb = os.path.getsize(out) / 1e6
         return (out, files,
                 f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
@@ -2481,7 +2491,7 @@ def launch_ui():
         b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
         status2 = gr.Markdown()
         video = gr.Video(label="ရလဒ်", autoplay=True)
-        dl = gr.File(label="⬇️ Download MP4", file_count="multiple")
+        dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲ ဖိုင်များ)", file_count="multiple")
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
         b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
