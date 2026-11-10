@@ -1,15 +1,15 @@
 """Recap CLI (slim): Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render -> auto split.
 
-Languages: Burmese (my) / German (de) / English (en)   ·   Sources: YouTube / TikTok (yt-dlp), Rednote, local file
+Languages: Burmese (my) / German (de) / English (en) / Spanish (es)
+Sources: YouTube / TikTok (yt-dlp), Rednote, local file
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang de
        python recap.py run <video|url> -d work/ep1 --lang en
-       python recap.py run <video|url> -d work/ep1 --lang en --mirror-every 5
-       python recap.py run <video|url> -d work/ep1 --bgm music.mp3 --bgm-vol 0.3
+       python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.26.0"
+__version__ = "1.27.0"
 
 import argparse
 import asyncio
@@ -54,7 +54,7 @@ TRIM = (
     "silenceremove=start_periods=1:start_threshold=-50dB,areverse,apad=pad_dur=0.2"
 )
 
-# German / English — GAPLESS (hard silence trim, 40ms pad only)
+# German / English / Spanish — GAPLESS (hard silence trim, 40ms pad only)
 TRIM_GAPLESS = (
     "silenceremove=start_periods=1:start_threshold=-38dB:start_silence=0.02:"
     "stop_periods=-1:stop_threshold=-38dB:stop_silence=0.02,"
@@ -66,6 +66,7 @@ TRIM_GAPLESS = (
 )
 TRIM_DE = TRIM_GAPLESS
 TRIM_EN = TRIM_GAPLESS
+TRIM_ES = TRIM_GAPLESS
 
 _HUMAN = (
     "VOICE STYLE (very important): the result will be read aloud by a speech engine, so it must "
@@ -291,6 +292,57 @@ _STORY_EN = (
     "a native English narrator of a hit drama recap channel would really say it. "
 )
 
+_STORY_ES = (
+    "NARRADOR DE RECAPITULACIÓN EN ESPAÑOL (muy importante): escribe como una persona "
+    "española real que le cuenta a un amigo en el café lo que pasó en una serie. NO debe sonar "
+    "como una traducción, un artículo de periódico, un ensayo escolar ni un archivo de subtítulos. "
+    "TIEMPO: cuenta todo el recap en presente (como cuando alguien te cuenta una película): "
+    "'Xiao Li llega a casa y ve que la puerta está abierta.' Usa pretérito perfecto o "
+    "pluscuamperfecto solo para cosas que pasaron antes ('Ella se lo había prometido años atrás.'). "
+    "No uses el pretérito literario para narrar ('respondió él', 'replicó ella'). "
+    "ESTILO INDIRECTO, COMO SE HABLA: usa una frase normal con 'que' o una coordinada: "
+    "'Ella dice que ya no tiene ganas.' o 'Ella dice que ya no quiere.' "
+    "NUNCA uses el subjuntivo literario rígido ('ella haya dicho', 'él sea', 'ella quiera'). "
+    "VERBOS DE HABLA (muy importante): nunca repitas el mismo verbo en dos líneas seguidas, y "
+    "'dice' como máximo una vez cada cuatro líneas. Rota: pregunta, responde, explica, opina, "
+    "replica, grita, chilla, susurra, advierte, promete, lo niega, lo admite, se ríe, amenaza, "
+    "suplica, murmura, le contesta, insiste. Cuando la acción ya lo muestra, quita el verbo de "
+    "habla y solo cuenta lo que hace la persona. "
+    "ESPAÑOL HABLADO Y NATURAL: usa palabras del día a día y, con moderación, partículas "
+    "modales donde de verdad encajen (pues, bueno, hombre, mira, oye, vale) — no en todas las "
+    "líneas. Están bien contracciones como 'pa'l', 'pal', 'dél' cuando hablas rápido, pero no "
+    "en todas partes. "
+    "Prefiere verbos vivos a sustantivos: NO 'Él mantiene una conversación con ella' sino "
+    "'Ellos hablan'; NO 'Ella toma la decisión de irse' sino 'Ella decide irse'. "
+    "Nada de español administrativo, ni 'con respecto a', 'en relación con', 'asimismo', "
+    "'no obstante' en todas las líneas. "
+    "VARIEDAD DE FRASES: mezcla frases cortas ('La puerta está abierta.') con medianas. No "
+    "empieces todas las frases con el nombre del personaje; a veces empieza con el tiempo o "
+    "el lugar ('A la mañana siguiente...', 'Poco después...', 'Afuera, en el pasillo...'). No "
+    "empieces más de dos líneas seguidas con la misma palabra. "
+    "CONECTORES: varíalos — y entonces, pero, de repente, poco después, mientras tanto, aun así, "
+    "mientras, justo, apenas entra cuando, entretanto, de pronto, solo que, por desgracia. "
+    "EXPRESIONES: nunca traduzcas refranes chinos o ingleses literalmente. Cámbialos por una "
+    "expresión que un español realmente diría, o simplemente di lo que quiere decir. "
+    "PRONOMBRES: usa él, ella, le, la, lo, les naturalmente para que el texto fluya y no repita "
+    "los nombres todo el tiempo. Si hay dos personajes del mismo género en la escena, usa el "
+    "nombre o una palabra de rol (la madre, el jefe) para que nadie se confunda. "
+    "NOMBRES: mantén los nombres chinos y asiáticos en su forma latina o pinyin, exactamente "
+    "igual siempre, nunca los traduzcas. Si no sabes un nombre, nunca escribas 'la persona', "
+    "'alguien' o 'una persona'. Usa una palabra de rol simple según el contexto (la madre, el "
+    "padre, el jefe, la vecina, la novia) o una palabra por aspecto: el joven, la joven, el "
+    "anciano, la señora mayor, la niña pequeña — y mantén la misma palabra para la misma persona. "
+    "NÚMEROS Y SÍMBOLOS (español): escribe todo con palabras, nunca con dígitos ni símbolos: "
+    "'50%' -> 'cincuenta por ciento', '100 dólares' -> 'cien dólares', '3 de la tarde' -> "
+    "'tres de la tarde', '2019' -> 'dos mil diecinueve', '1,5 millones' -> 'un millón "
+    "y medio'. Sin abreviaturas: 'por ejemplo' en vez de 'p. ej.', 'etcétera' en vez de 'etc.'. "
+    "EMOCIÓN: muestra los sentimientos con las palabras y el ritmo: 'Le grita', 'susurra con "
+    "lágrimas en los ojos', 'sonríe con frialdad', 'no da crédito a sus oídos'. Una pregunta "
+    "de un personaje debe sonar a pregunta de verdad: 'Ella le pregunta de dónde saca eso.' "
+    "AUTOCORRECCIÓN FINAL para cada línea: imagina que la lees en voz alta a un amigo. Si suena "
+    "a traducción, a libro de texto o a robot, reescríbela como la diría un español de verdad. "
+)
+
 
 def _tail(script, accent, story):
     return (
@@ -397,6 +449,39 @@ LANG_CONF = {
         "clean": r"[^A-Za-z0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
+    "es": {
+        "name": "Spanish", "label": "စပိန်",
+        "sample": "Esta es una línea de subtítulo de ejemplo.",
+        "rate": 5, "trim": TRIM_ES,
+        "edge_voices": [("es-ES-ElviraNeural", "Elvira (female, ES)"),
+                        ("es-ES-AlvaroNeural", "Álvaro (male, ES)"),
+                        ("es-MX-DaliaNeural", "Dalia (female, MX)"),
+                        ("es-MX-JorgeNeural", "Jorge (male, MX)"),
+                        ("es-AR-ElenaNeural", "Elena (female, AR)"),
+                        ("es-AR-TomasNeural", "Tomás (male, AR)")],
+        "sentence_end": r"(?<=[.!?])\s+",
+        "prompt": (
+            "You are a native Spanish (Español) storyteller who retells TV dramas to friends in "
+            "a recap video. Rewrite every numbered line below as natural, relaxed, spoken "
+            "Spanish — the way a real person would tell it, not a translation. "
+            + _tail(script="use ONLY Spanish (Latin script with accents á é í ó ú ñ ü), no Chinese letters.",
+                    accent=("Habla un español relajado y cotidiano, como en una charla con un amigo: "
+                            "las contracciones y el habla coloquial están bien, y pon una coma en "
+                            "cada punto natural de respiración."),
+                    story=_STORY_ES)
+        ),
+        "chunk_note": (
+            _RECAP_NOTE +
+            "Keep character names, their spelling and role words exactly the same as in the other "
+            "parts. Keep the same tense (presente) and the same relaxed spoken Spanish tone as in "
+            "all other parts. Vary reporting verbs and sentence openings; 'dice' at most once "
+            "every four lines. Use él/ella naturally, but use the name when two characters of the "
+            "same gender are in the scene."
+        ),
+        "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
+        "clean": r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\s.,!?\"'%\-]",
+        "is_mm": False,
+    },
 }
 
 LANG_ALIASES = {c["label"]: k for k, c in LANG_CONF.items()}
@@ -411,7 +496,7 @@ def resolve_lang(value):
         return LANG_ALIASES[v]
     if v.lower() in LANG_ALIASES:
         return LANG_ALIASES[v.lower()]
-    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de / en)")
+    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de / en / es)")
 
 
 @dataclass
@@ -431,9 +516,9 @@ class Settings:
     max_speed: float = 1.25
     crop: bool = True
     flip: bool = True
-    mirror_every: float = 0.0
+    mirror_every: float = 5.0      # default 5s (hidden from UI)
     zoom: float = 1.0
-    render_workers: int = 0
+    render_workers: int = 4        # default 4  (hidden from UI)
     split: bool = True
     split_min: float = 2.0
     sub: bool = True
@@ -546,7 +631,7 @@ def timing_table(d):
 
 
 # ======================================================================
-# fonts + subtitle text splitting
+# fonts
 # ======================================================================
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -696,7 +781,7 @@ def split_for_sub(text, mc=36, lang="my"):
 
 
 # ======================================================================
-# overlay (DO NOT TOUCH — blur effect preserved exactly as original)
+# overlay (DO NOT TOUCH — blur effect preserved exactly)
 # ======================================================================
 SWEEP_TRAIL = np.array([185, 232, 255], np.float32)
 SWEEP_BAND = np.array([235, 255, 255], np.float32)
@@ -1872,7 +1957,7 @@ SUP = argparse.SUPPRESS
 
 def add_style_args(p):
     g = p.add_argument_group("voice / language")
-    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en")
+    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en | es")
     g.add_argument("--voice", default=SUP)
     g.add_argument("--rate", type=int, default=SUP)
     g.add_argument("--workers", dest="tts_workers", type=int, default=SUP)
@@ -1890,7 +1975,7 @@ def add_style_args(p):
     g.add_argument("--zoom", type=float, default=SUP)
     g.add_argument("--render-workers", type=int, default=SUP)
     g.add_argument("--mirror-every", type=float, default=SUP,
-                   help="Mirror ကို ဘယ်နှစ်စက္ကန့်တစ်ခါ လှန်မလဲ · 0 = အမြဲ · -1 = မလုပ်ဘူး")
+                   help="Mirror ကို ဘယ်နှစ်စက္ကန့်တစ်ခါ လှန်မလဲ · 0 = အမြဲ · -1 = မလုပ်ဘူး (default 5)")
     g.add_argument("--no-flip", dest="flip", action="store_false", default=SUP)
     g.add_argument("--no-crop", dest="crop", action="store_false", default=SUP)
     g.add_argument("--split", dest="split_min", type=float, default=SUP)
@@ -1909,7 +1994,8 @@ def add_style_args(p):
 def add_whisper_args(p):
     g = p.add_argument_group("whisper")
     g.add_argument("--model", choices=["tiny", "base", "small"], default="base")
-    g.add_argument("--src-lang", default="auto")
+    g.add_argument("--src-lang", default="auto",
+                   help="auto | en | zh | ko | ja | hi | th | vi | id | es | fr | de | ru | ...")
     g.add_argument("--no-batch", action="store_true")
     g.add_argument("--max-min", type=int, default=0)
 
@@ -1929,7 +2015,7 @@ def settings_for(proj, args):
     s.loud_lufs = max(-24.0, min(-8.0, float(s.loud_lufs)))
     s.render_workers = max(0, min(16, int(s.render_workers)))
     if s.mirror_every is None:
-        s.mirror_every = 0.0
+        s.mirror_every = 5.0
     s.mirror_every = float(s.mirror_every)
     s.bgm_vol = max(0.0, min(1.0, float(s.bgm_vol)))
     s.split_min = max(0.0, float(s.split_min))
@@ -2102,7 +2188,7 @@ def launch_ui():
     BASE = os.path.join(os.getcwd(), "work_ui")
     os.makedirs(BASE, exist_ok=True)
     PORT = int(os.environ.get("PORT", "7860"))
-    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en"}
+    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en", "စပိန်": "es"}
 
     def voices_for(code):
         return [v for v, _ in LANG_CONF[code]["edge_voices"]]
@@ -2148,7 +2234,7 @@ def launch_ui():
 </script>
 """
     ui_kw = {
-        "title": "Recap → Burmese / German / English",
+        "title": "Recap → my / de / en / es",
         "theme": gr.themes.Base(primary_hue="indigo", secondary_hue="purple", neutral_hue="slate"),
         "css": ":root, html, body, gradio-app { color-scheme: dark; }"
                " body, gradio-app, .gradio-container { background: #0b0f19 !important; }"
@@ -2189,7 +2275,7 @@ def launch_ui():
         threading.Thread(target=work, daemon=True).start()
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
-    def _preview(pdir, lang_name, height, zoom, crop, flip, mirror_every, sub, sub_size,
+    def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size,
                  sub_pos, sweep, pv_t, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
@@ -2201,9 +2287,10 @@ def launch_ui():
             s = proj.settings
             s.lang, s.height, s.zoom = code, int(height), float(zoom)
             s.crop, s.flip = bool(crop), bool(flip)
-            s.mirror_every = float(mirror_every)
+            s.mirror_every = 5.0   # hidden default
             s.sub = bool(sub)
             s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
+            s.render_workers = 4   # hidden default
             font = find_font(code, s.font) if s.sub else None
             for old in glob.glob(os.path.join(pdir, "preview_*.png")):
                 try:
@@ -2294,8 +2381,8 @@ def launch_ui():
 
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
-              height, fps, preset, max_speed, crop, flip, mirror_every, zoom,
-              sub, sub_size, sub_pos, sweep, rworkers,
+              height, fps, preset, max_speed, crop, flip, zoom,
+              sub, sub_size, sub_pos, sweep,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
@@ -2316,31 +2403,49 @@ def launch_ui():
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
-            s.mirror_every = float(mirror_every)
+            # HIDDEN defaults
+            s.mirror_every = 5.0        # 5s mirror
+            s.render_workers = 4        # 4 parallel
+            s.split = True
+            s.split_min = 2.0           # 2 min per part
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
-            s.render_workers = int(rworkers)
-            # Neon: always ON with defaults (no UI slider)
+            # Neon: always ON with defaults
             s.neon = True
             s.neon_th = 3
             s.neon_speed = 0.15
             prog = Progress(0.0, 1.0, parent=_cb(progress))
             res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None, prog)
+
+            # auto split
+            out = os.path.join(pdir, f"final_{code}_{int(time.time())}.mp4")
+            shutil.copy(res["final"], out)
+            files = [out]
+            split_note = ""
+            if s.split and s.split_min > 0:
+                parts_out = split_video(out, os.path.splitext(out)[0], s.split_min)
+                if len(parts_out) > 1:
+                    files = parts_out
+                    durs = [probe_duration(p) for p in parts_out]
+                    split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း: "
+                                  + " · ".join(f"P{k + 1} {fmt_t(d)}" for k, d in enumerate(durs)))
+                else:
+                    split_note = f"\n\n✂️ {s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ"
         except gr.Error:
             raise
         except Exception as ex:
             raise gr.Error(str(ex)[:600])
 
         for old in glob.glob(os.path.join(pdir, "final_*.mp4")):
-            try:
-                os.remove(old)
-            except OSError:
-                pass
-        out = os.path.join(pdir, f"final_{code}_{int(time.time())}.mp4")
-        shutil.copy(res["final"], out)
+            if old != out:
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
         mb = os.path.getsize(out) / 1e6
-        return (out, [out],
-                f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB")
+        return (out, files,
+                f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
+                + split_note)
 
     def reset_all(pdir):
         if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
@@ -2366,8 +2471,8 @@ def launch_ui():
         return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
 
     with gr.Blocks(**blocks_kw) as demo:
-        gr.Markdown(f"# 🎙️ Recap → Burmese / German / English  `v{__version__}`\n"
-                    f"Whisper → Gemini (Recap mode · {CHUNK} ကြောင်းစီ) → Edge TTS → Smart Sync → စာတန်း + Neon")
+        gr.Markdown(f"# 🎙️ Recap → my / de / en / es  `v{__version__}`\n"
+                    f"Whisper → Gemini → Edge TTS → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=2min")
         pdir_state = gr.State("")
         height = gr.State(720)
         fps = gr.State(24)
@@ -2408,21 +2513,17 @@ def launch_ui():
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
                          label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့်)")
 
-        with gr.Accordion("🎛️ စာတန်း / Mirror / Render", open=False):
+        # Only subtitles in UI (mirror / render workers hidden)
+        with gr.Accordion("🎛️ စာတန်း", open=False):
             with gr.Row():
                 sub = gr.Checkbox(True, label="စာတန်း")
                 sweep = gr.Checkbox(True, label="🎵 Music sweep")
-                flip = gr.Checkbox(True, label="Mirror (legacy: constant)")
-            mirror_every = gr.Slider(-1, 30, value=5, step=1,
-                                     label="🔁 Mirror လှန်ချိန် (စက္ကန့်) — 5 = 5စက္ကန့်တစ်ခါ · 0 = အမြဲ · -1 = မလုပ်ဘူး")
+                flip = gr.Checkbox(True, label="Mirror")
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
-            rworkers = gr.Slider(0, 12, value=0, step=1,
-                                 label="Render တစ်ပြိုင်နက် (0 = auto)")
 
-        pv_in = [pdir_state, lang, height, zoom, crop, flip, mirror_every,
-                 sub, sub_size, sub_pos, sweep, pv_t]
+        pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click):
@@ -2430,7 +2531,7 @@ def launch_ui():
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, pv_t, mirror_every):
+        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, pv_t):
             c.change(preview_auto, pv_in, pv_img,
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
@@ -2472,8 +2573,8 @@ def launch_ui():
                          show_progress="hidden")
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
-                         height, fps, preset, max_speed, crop, flip, mirror_every, zoom,
-                         sub, sub_size, sub_pos, sweep, rworkers],
+                         height, fps, preset, max_speed, crop, flip, zoom,
+                         sub, sub_size, sub_pos, sweep],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
