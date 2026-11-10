@@ -2620,8 +2620,7 @@ def launch_ui():
                          bgm_file, bgm_vol, voice_db, duck,
                          height, fps, preset, max_speed, crop, flip, zoom,
                          sub, sub_size, sub_pos, sweep, punch],
-                 [video, dl, status2], show_progress="hidden",
-                 trigger_mode="once", concurrency_limit=1)
+                 [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
                   pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1,
