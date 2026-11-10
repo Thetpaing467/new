@@ -9,7 +9,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.27.2"
+__version__ = "1.27.3"
 
 import argparse
 import asyncio
@@ -2405,7 +2405,6 @@ def launch_ui():
         height = gr.State(720)
         fps = gr.State(24)
         preset = gr.State("ultrafast")
-        max_speed = gr.State(1.25)
         crop = gr.State(True)
         model = gr.State("base")
         src_lang = gr.State("auto")
@@ -2419,6 +2418,9 @@ def launch_ui():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="Edge speed %")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
+            max_speed = gr.Radio([("1.25× (သဘာဝကျ၊ ဇာတ်ခန်း ပိုပျောက်)", 1.25),
+                                  ("1.5× (ဇာတ်ခန်း ပိုပါ၊ ပိုမြန်)", 1.5)],
+                                 value=1.5, label="Video အမြန်ဆုံး နှုန်း")
             lang.change(on_lang_change, lang, [voice, rate])
 
         with gr.Accordion("🎵 Background music + Voice အသံ", open=False):
