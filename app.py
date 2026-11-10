@@ -9,7 +9,7 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.27.3"
+__version__ = "1.27.4"
 
 import argparse
 import asyncio
@@ -526,6 +526,10 @@ class Settings:
     neon: bool = True
     neon_th: int = 3
     neon_speed: float = 0.15
+    punch: bool = True             # ၃ စက္ကန့်တိုင်း ရပ်ပြီး zoom in
+    punch_every: float = 3.0
+    punch_hold: float = 0.5
+    punch_zoom: float = 1.15
 
     def to_dict(self):
         return asdict(self)
@@ -935,6 +939,25 @@ def zoom_rect(rect, zoom):
     nw, nh = max(2, int(w / zoom) // 2 * 2), max(2, int(h / zoom) // 2 * 2)
     return (x + (w - nw) // 2, y + (h - nh) // 2, nw, nh)
 
+def punch_state(T, every, hold, zmax):
+    """၃ စက္ကန့်တိုင်း (every) ရဲ့ နောက်ဆုံး hold စက္ကန့်မှာ frame ကို ရပ်ပြီး zoom in ဆွဲမယ်။
+    return (frame ရွေးမယ့် အချိန်, zoom)။ hold ပြီးရင် zoom ကို ချက်ချင်း ၁.၀ ပြန်ကျမယ်။"""
+    if every <= 0 or hold <= 0:
+        return T, 1.0
+    ph = T % every
+    start = every - hold
+    if ph < start:
+        return T, 1.0
+    p = (ph - start) / hold
+    e = p * p * (3.0 - 2.0 * p)          # ease in-out
+    return T - (ph - start), 1.0 + (zmax - 1.0) * e
+
+def center_zoom(fr, z):
+    H, W = fr.shape[:2]
+    cw, ch = max(2, int(W / z)), max(2, int(H / z))
+    x0, y0 = (W - cw) // 2, (H - ch) // 2
+    return cv2.resize(fr[y0:y0 + ch, x0:x0 + cw], (W, H), interpolation=cv2.INTER_LINEAR)
+
 def zoom_flip(fr, zoom, flip):
     zoomed = zoom > 1.001
     if zoomed:
@@ -1300,6 +1323,11 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
     neon = _neon_for(W, H, s.neon_th, s.neon_speed) if s.neon else None
 
+    punch_on = bool(getattr(s, "punch", False)) and float(s.punch_every) > 0
+    p_every = float(s.punch_every)
+    p_hold = float(s.punch_hold)
+    p_zoom = float(s.punch_zoom)
+
     def mirror_at(t):
         if mirror_every < 0:
             return False
@@ -1370,7 +1398,12 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                     while ui < len(plan) - 1 and T >= plan[ui + 1][0]:
                         ui += 1
                     cs, _d, s0, spd = plan[ui]
-                    idx = min(max(int((s0 + (T - cs) * spd) * sfps + 0.5), 0), stotal - 1)
+                    if punch_on:
+                        Te, pz = punch_state(T, p_every, p_hold, p_zoom)
+                        Te = max(Te, cs)      # freeze ဇာတ်ခန်းနယ်မကျော်စေ
+                    else:
+                        Te, pz = T, 1.0
+                    idx = min(max(int((s0 + (Te - cs) * spd) * sfps + 0.5), 0), stotal - 1)
                     if idx > cur + 90 or idx < cur:
                         cap_.set(cv2.CAP_PROP_POS_FRAMES, idx)
                         cur = idx - 1
@@ -1386,7 +1419,8 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                             last = apply_view(f, rect, W, H, chunk_mirror, interp)
                     if last is None:
                         return
-                    if not put(last.copy()):
+                    out_fr = center_zoom(last, pz) if pz > 1.001 else last.copy()
+                    if not put(out_fr):
                         return
             finally:
                 while not lstop.is_set():
@@ -1919,6 +1953,11 @@ def add_style_args(p):
     g.add_argument("--no-neon", dest="neon", action="store_false", default=SUP)
     g.add_argument("--neon-th", type=int, default=SUP)
     g.add_argument("--neon-speed", type=float, default=SUP)
+    g = p.add_argument_group("punch zoom")
+    g.add_argument("--no-punch", dest="punch", action="store_false", default=SUP)
+    g.add_argument("--punch-every", type=float, default=SUP)
+    g.add_argument("--punch-hold", type=float, default=SUP)
+    g.add_argument("--punch-zoom", type=float, default=SUP)
 
 def add_whisper_args(p):
     g = p.add_argument_group("whisper")
@@ -1945,6 +1984,9 @@ def settings_for(proj, args):
     if s.mirror_every is None:
         s.mirror_every = 5.0
     s.mirror_every = float(s.mirror_every)
+    s.punch_every = max(1.0, float(s.punch_every))
+    s.punch_hold = max(0.1, min(float(s.punch_hold), s.punch_every - 0.5))
+    s.punch_zoom = max(1.02, min(1.4, float(s.punch_zoom)))
     s.bgm_vol = max(0.0, min(1.0, float(s.bgm_vol)))
     s.split_min = max(0.0, float(s.split_min))
     if s.voice:
@@ -2199,7 +2241,7 @@ def launch_ui():
 
     def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size,
                  sub_pos, sweep, pv_t, strict):
-        if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
+     if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
             return gr.skip()
@@ -2304,7 +2346,7 @@ def launch_ui():
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
               height, fps, preset, max_speed, crop, flip, zoom,
-              sub, sub_size, sub_pos, sweep,
+              sub, sub_size, sub_pos, sweep, punch,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
@@ -2334,6 +2376,8 @@ def launch_ui():
 
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
+            s.punch = bool(punch)
+            s.punch_every, s.punch_hold, s.punch_zoom = 3.0, 0.5, 1.15
             # Neon: always ON with defaults
             s.neon = True
             s.neon_th = 3
@@ -2449,6 +2493,7 @@ def launch_ui():
                 sub = gr.Checkbox(True, label="စာတန်း")
                 sweep = gr.Checkbox(True, label="🎵 Music sweep")
                 flip = gr.Checkbox(True, label="Mirror")
+                punch = gr.Checkbox(True, label="🔍 ၃ စက္ကန့်တိုင်း ရပ်ပြီး Zoom")
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
@@ -2504,7 +2549,7 @@ def launch_ui():
         b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
                          height, fps, preset, max_speed, crop, flip, zoom,
-                         sub, sub_size, sub_pos, sweep],
+                         sub, sub_size, sub_pos, sweep, punch],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
