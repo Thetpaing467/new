@@ -536,7 +536,7 @@ class Settings:
     zoom: float = 1.0
     render_workers: int = 4        # default 4  (hidden from UI)
     split: bool = True
-    split_min: float = 2.0
+    split_min: float = 1.03
     sub: bool = True
     sub_size: float = 7.0
     sub_pos: int = 90
@@ -1585,7 +1585,7 @@ def split_plan(total, seg_secs):
         plan.append((st, end - st))
     return plan
 
-def split_video(src, out_prefix, seg_min=2.0, progress=None):
+def split_video(src, out_prefix, seg_min=1.03, progress=None):
     total = probe_duration(src)
     plan = split_plan(total, float(seg_min) * 60.0)
     if len(plan) <= 1:
@@ -2398,7 +2398,7 @@ def launch_ui():
             s.mirror_every = 5.0        # 5s mirror
             s.render_workers = 4        # 4 parallel
             s.split = True
-            s.split_min = 2.0           # 2 min per part
+            s.split_min = 1.03          # 1.03 min per part
 
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
@@ -2502,7 +2502,7 @@ def launch_ui():
 
     with gr.Blocks(**blocks_kw) as demo:
         gr.Markdown(f"# 🎙️ Recap → my / de / en / es  `v{__version__}`\n"
-                    f"Whisper → Gemini → Edge TTS → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=2min")
+                    f"Whisper → Gemini → Edge TTS → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
         fps = gr.State(24)
