@@ -89,9 +89,19 @@ _RECAP_MODE = (
     "Do NOT move content between lines and do NOT invent events that are not in the source. "
 )
 
+_NO_MISSING_LINES = (
+    "CRITICAL — DO NOT MISS ANY LINE: every numbered input line MUST produce exactly one numbered "
+    "output line. Do not skip, merge, combine, reorder, or silently omit any input number, even if "
+    "the source is repetitive, unclear, very short, or contains only a name or sound. If a line is "
+    "unclear or unimportant, preserve its meaning as a short natural bridge sentence; NEVER return "
+    "an empty line. Before sending the answer, count the input numbers and output numbers and verify "
+    "that they match exactly, from the first number to the last number. "
+)
+
 _RECAP_NOTE = (
     "Continue in the same RECAP MODE as the earlier parts: condense, keep only story-moving "
-    "content, about 50-70% of a literal translation, never leave a line empty. "
+    "content, about 50-70% of a literal translation. "
+    + _NO_MISSING_LINES
 )
 
 _STORY_CORE = (
@@ -346,6 +356,7 @@ _STORY_ES = (
 def _tail(script, accent, story):
     return (
         _RECAP_MODE
+        + _NO_MISSING_LINES
         + "Keep character names consistent across all lines; " + script + " "
         + _HUMAN.replace("{accent}", accent) + _STORY_CORE + story +
         "Output exactly one line per input line in the format [number] text "
@@ -2323,7 +2334,10 @@ def launch_ui():
                 st["done"] = True
 
         threading.Thread(target=work, daemon=True).start()
-        return jid, "⏳ စတင်နေတယ်... 0%", gr.Timer(active=True), gr.update(interactive=False)
+        # Start the next video with a clean UI/state so the previous video's
+        # prompt parts and rendered files cannot remain visible underneath it.
+        return (jid, "⏳ စတင်နေတယ်... 0%", gr.Timer(active=True), gr.update(interactive=False),
+                "", [], {}, "", None, None, "")
 
     def poll_step1(jid):
         st = TRANS.get(jid) if jid else None
@@ -2422,7 +2436,12 @@ def launch_ui():
     def reset_all(pdir):
         if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
             shutil.rmtree(pdir, ignore_errors=True)
-        return "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး"
+        # Clear the actual URL textbox as well as every state/output/timer.
+        # Previously url was not an output of this handler, so the old link
+        # stayed visible even though the project state had been deleted.
+        return ("", "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး",
+                "", "", gr.Timer(active=False), gr.Timer(active=False),
+                gr.update(interactive=True))
 
     def make_setter(lo, hi):
         def f(text, parts):
@@ -2542,7 +2561,8 @@ def launch_ui():
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
         b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
-                 [trans_job, status1, trans_timer, b1])
+                 [trans_job, status1, trans_timer, b1, pdir_state, chunks_state,
+                  parts_state, translated, video, dl, status2])
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
@@ -2552,8 +2572,8 @@ def launch_ui():
                          sub, sub_size, sub_pos, sweep, punch],
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
-                 [pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-                  pv_img, video, dl, status2])
+                 [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
+                  pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
