@@ -13,7 +13,6 @@ __version__ = "1.27.4"
 
 import argparse
 import asyncio
-from collections import Counter
 import glob
 import hashlib
 import inspect
@@ -97,6 +96,15 @@ _NO_MISSING_LINES = (
     "unclear or unimportant, preserve its meaning as a short natural bridge sentence; NEVER return "
     "an empty line. Before sending the answer, count the input numbers and output numbers and verify "
     "that they match exactly, from the first number to the last number. "
+)
+
+_HASHTAG_INSTRUCTION = (
+    "HASHTAGS — FINAL OUTPUT ONLY: after all numbered recap lines, write exactly one separate line "
+    "in this exact format: HASHTAGS: #tag1 #tag2 #tag3 #tag4 #tag5. Choose five hashtags that "
+    "are genuinely relevant to the complete episode/story and the target-language audience. "
+    "Do not use generic words, pronouns, conjunctions, grammar words, Burmese words, or hashtags "
+    "unrelated to the story. Use the target language and movie/genre terms only when they fit. "
+    "Do not add any explanation before or after the HASHTAGS line. "
 )
 
 _RECAP_NOTE = (
@@ -1231,7 +1239,7 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
 # ======================================================================
 def build_prompt(units, lang="my"):
     lines = "\n".join(f"[{i}] {u['src']}" for i, u in enumerate(units))
-    return LANG_CONF[lang]["prompt"] + lines
+    return LANG_CONF[lang]["prompt"] + lines + "\n\n" + _HASHTAG_INSTRUCTION
 
 def build_prompt_chunks(units, lang="my", size=CHUNK):
     conf = LANG_CONF[lang]
@@ -1243,7 +1251,10 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
         lines = "\n".join(f"[{i}] {units[i]['src']}" for i in range(lo, hi))
         note = (f"(PART {k + 1} of {total} of the same episode. Only lines [{lo}] to [{hi - 1}]. "
                 f"Keep the SAME numbers. {conf['chunk_note']})\n\n")
-        out.append({"lo": lo, "hi": hi, "text": head + note + lines})
+        text = head + note + lines
+        if k == total - 1:
+            text += "\n\n" + _HASHTAG_INSTRUCTION
+        out.append({"lo": lo, "hi": hi, "text": text})
     return out
 
 def parse_numbered(text, n):
@@ -2462,59 +2473,32 @@ def launch_ui():
         v = voices_for(code)
         return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
 
-    def make_hashtags(text, lang_name):
-        """Create five copyable hashtags from the pasted AI recap text."""
+    def extract_hashtags_from_parts(parts, translated, lang_name):
+        """Extract only hashtags explicitly returned by AI, never invent keywords."""
         code = LANGS[lang_name]
-        raw = re.sub(r"\s+", " ", (text or "").strip())
-        if not raw:
-            return ""
-
-        stop = {
-            "en": {"the", "and", "that", "this", "with", "from", "when", "then", "they",
-                    "have", "has", "into", "after", "before", "about", "just", "very", "their",
-                    "there", "where", "what", "which", "will", "were", "been", "being", "herself",
-                    "himself", "someone", "another", "because"},
-            "de": {"der", "die", "das", "und", "dass", "dieser", "diese", "mit", "von",
-                    "wenn", "dann", "sie", "ist", "sich", "nach", "vor", "eine", "ein", "einer",
-                    "einem", "einen", "wird", "werden", "war", "sind", "seine", "ihrer", "dort"},
-            "es": {"el", "la", "los", "las", "y", "que", "con", "desde", "cuando", "entonces",
-                    "ellos", "ellas", "ella", "él", "para", "pero", "como", "sobre", "después",
-                    "antes", "una", "un", "por", "sus", "son", "está", "están", "también"},
-            "my": {"နဲ့", "က", "မှာ", "ကို", "သည်", "တယ်", "ပါတယ်", "ပြီး", "တော့", "အဲဒီ", "သူတို့"},
-        }[code]
-        token_pattern = (r"[A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]+" if code == "my"
-                         else r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]+")
-        tokens = re.findall(token_pattern, raw.lower())
-        counts = Counter(t for t in tokens if len(t) >= 4 and t not in stop and not t.isdigit())
-        topical = []
-        for word, _ in counts.most_common():
-            word = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]", "", word)
-            if word and word not in topical and len(word) <= 28:
-                topical.append(word)
-            if len(topical) >= 2:
-                break
-
-        base = {
-            "my": ["movierecap", "movieexplained", "ရုပ်ရှင်", "ဇာတ်ကား", "fyp"],
-            "de": ["filmzusammenfassung", "film erklärt", "filmtok", "serienrecap", "fyp"],
-            "en": ["movierecap", "movieexplained", "endingexplained", "filmrecap", "fyp"],
-            "es": ["resumendepelicula", "peliculaexplicada", "finalexplicado", "filmrecap", "fyp"],
-        }[code]
-        tags = []
-        for tag in topical + base:
-            tag = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]", "", tag)
-            if tag and tag.lower() not in {x.lower() for x in tags}:
-                tags.append(tag)
-            if len(tags) == 5:
-                break
-        return " ".join("#" + tag for tag in tags[:5])
-
-    def make_hashtags_from_parts(parts, translated, lang_name):
-        """Use the Gemini result boxes already filled in the prompt section."""
         values = [parts[k] for k in sorted(parts or {}) if (parts or {}).get(k)]
         if translated:
             values.append(translated)
-        return make_hashtags("\n".join(values), lang_name)
+        raw = "\n".join(values)
+        if not raw:
+            return ""
+
+        # Prefer the final explicit HASHTAGS line. This prevents ordinary words
+        # in the recap (for example Spanish "ella" or "para") becoming tags.
+        marker_lines = re.findall(r"(?im)^\s*HASHTAGS\s*:\s*(.+?)\s*$", raw)
+        source = marker_lines[-1] if marker_lines else raw
+        found = re.findall(r"(?<!\w)#([A-Za-zÀ-ÖØ-öø-ÿ0-9_\u1000-\u109F]+)", source)
+        tags = []
+        for tag in found:
+            if code != "my" and re.search(r"[\u1000-\u109F]", tag):
+                continue
+            if tag.lower() in {"tag1", "tag2", "tag3", "tag4", "tag5", "hashtag"}:
+                continue
+            if tag.lower() not in {x.lower() for x in tags}:
+                tags.append(tag)
+            if len(tags) == 5:
+                break
+        return " ".join("#" + tag for tag in tags)
 
     with gr.Blocks(**blocks_kw) as demo:
         gr.Markdown(f"# 🎙️ Recap → my / de / en / es  `v{__version__}`\n"
@@ -2613,15 +2597,15 @@ def launch_ui():
         status2 = gr.Markdown()
         video = gr.Video(label="ရလဒ်", autoplay=True)
         dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲ ဖိုင်များ)", file_count="multiple")
-        gr.Markdown("### #️⃣ Prompt အပိုင်းထဲက Gemini ရလဒ်နဲ့ Hashtag ၅ ခု")
-        hashtag_btn = gr.Button("#️⃣ Hashtag ၅ ခုထုတ်")
+        gr.Markdown("### #️⃣ နောက်ဆုံး Gemini Part ထဲက Hashtag ၅ ခု")
+        hashtag_btn = gr.Button("#️⃣ AI ထုတ်ပေးထားတဲ့ Hashtag တွေပြရန်")
         hashtag_output = gr.Textbox(
             label="Copy လုပ်ရန် Hashtag ၅ ခု",
             lines=2,
             interactive=False,
             show_copy_button=True,
         )
-        hashtag_btn.click(make_hashtags_from_parts, [parts_state, translated, lang], hashtag_output)
+        hashtag_btn.click(extract_hashtags_from_parts, [parts_state, translated, lang], hashtag_output)
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
         b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
