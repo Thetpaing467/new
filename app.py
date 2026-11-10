@@ -13,6 +13,7 @@ __version__ = "1.27.4"
 
 import argparse
 import asyncio
+from collections import Counter
 import glob
 import hashlib
 import inspect
@@ -2337,7 +2338,7 @@ def launch_ui():
         # Start the next video with a clean UI/state so the previous video's
         # prompt parts and rendered files cannot remain visible underneath it.
         return (jid, "⏳ စတင်နေတယ်... 0%", gr.Timer(active=True), gr.update(interactive=False),
-                "", [], {}, "", None, None, "")
+                "", [], {}, "", None, None, "", "", "")
 
     def poll_step1(jid):
         st = TRANS.get(jid) if jid else None
@@ -2441,7 +2442,7 @@ def launch_ui():
         # stayed visible even though the project state had been deleted.
         return ("", "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး",
                 "", "", gr.Timer(active=False), gr.Timer(active=False),
-                gr.update(interactive=True))
+                gr.update(interactive=True), "", "")
 
     def make_setter(lo, hi):
         def f(text, parts):
@@ -2460,6 +2461,47 @@ def launch_ui():
         code = LANGS[l]
         v = voices_for(code)
         return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
+
+    def make_hashtags(text, lang_name):
+        """Create five copyable hashtags from the pasted AI recap text."""
+        code = LANGS[lang_name]
+        raw = re.sub(r"\s+", " ", (text or "").strip())
+        if not raw:
+            return ""
+
+        stop = {
+            "en": {"the", "and", "that", "this", "with", "from", "when", "then", "they",
+                    "have", "has", "into", "after", "before", "about", "just", "very"},
+            "de": {"der", "die", "das", "und", "dass", "dieser", "diese", "mit", "von",
+                    "wenn", "dann", "sie", "ist", "sich", "nach", "vor", "eine", "ein"},
+            "es": {"el", "la", "los", "las", "y", "que", "con", "desde", "cuando", "entonces",
+                    "ellos", "ella", "después", "antes", "una", "un", "por"},
+            "my": {"နဲ့", "က", "မှာ", "ကို", "သည်", "တယ်", "ပါတယ်", "ပြီး", "တော့", "အဲဒီ", "သူတို့"},
+        }[code]
+        tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]+", raw.lower())
+        counts = Counter(t for t in tokens if len(t) >= 4 and t not in stop and not t.isdigit())
+        topical = []
+        for word, _ in counts.most_common():
+            word = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]", "", word)
+            if word and word not in topical and len(word) <= 28:
+                topical.append(word)
+            if len(topical) >= 2:
+                break
+
+        base = {
+            "my": ["movierecap", "movieexplained", "ရုပ်ရှင်", "ဇာတ်ကား", "fyp"],
+            "de": ["filmzusammenfassung", "film erklärt", "filmtok", "serienrecap", "fyp"],
+            "en": ["movierecap", "movieexplained", "endingexplained", "filmrecap", "fyp"],
+            "es": ["resumendepelicula", "peliculaexplicada", "finalexplicado", "filmrecap", "fyp"],
+        }[code]
+        tags = []
+        for tag in topical + base:
+            tag = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]", "", tag)
+            if tag and tag.lower() not in {x.lower() for x in tags}:
+                tags.append(tag)
+            if len(tags) == 5:
+                break
+        return " ".join("#" + tag for tag in tags[:5])
 
     with gr.Blocks(**blocks_kw) as demo:
         gr.Markdown(f"# 🎙️ Recap → my / de / en / es  `v{__version__}`\n"
@@ -2558,11 +2600,26 @@ def launch_ui():
         status2 = gr.Markdown()
         video = gr.Video(label="ရလဒ်", autoplay=True)
         dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲ ဖိုင်များ)", file_count="multiple")
+        gr.Markdown("### #️⃣ AI စာထဲကနေ Hashtag ၅ ခုထုတ်ရန်")
+        hashtag_source = gr.Textbox(
+            label="AI ဆီကရတဲ့ စာကို ဒီမှာ Paste လုပ်ပါ",
+            placeholder="AI result / movie summary ကို ဒီမှာ paste လုပ်ပါ...",
+            lines=4,
+        )
+        hashtag_btn = gr.Button("#️⃣ Hashtag ၅ ခုထုတ်")
+        hashtag_output = gr.Textbox(
+            label="Copy လုပ်ရန် Hashtag ၅ ခု",
+            lines=2,
+            interactive=False,
+            show_copy_button=True,
+        )
+        hashtag_btn.click(make_hashtags, [hashtag_source, lang], hashtag_output)
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
         b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
                  [trans_job, status1, trans_timer, b1, pdir_state, chunks_state,
-                  parts_state, translated, video, dl, status2])
+                  parts_state, translated, video, dl, status2, hashtag_source,
+                  hashtag_output])
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
@@ -2573,7 +2630,8 @@ def launch_ui():
                  [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
-                  pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1])
+                  pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1,
+                  hashtag_source, hashtag_output])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
