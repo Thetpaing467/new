@@ -76,10 +76,7 @@ _HUMAN = (
     "(mix short punchy lines with longer flowing ones); never write a long sentence without a "
     "breathing pause; use everyday spoken wording instead of stiff, literary or textbook wording; "
     "let emotion match the scene (tension, surprise, sadness, relief). {accent} "
-    "Do NOT use ellipsis (...), brackets, asterisks or stage directions. Add at most one or two "
-    "natural, scene-appropriate emoji per output line when it helps show emotion or action "
-    "(for example 😱 😢 😡 ❤️ 🔥). Emoji are for the on-screen subtitle only; do not let them "
-    "change the meaning, and never put emoji in the HASHTAGS line. "
+    "Do NOT use ellipsis (...), emoji, brackets, asterisks or stage directions. "
 )
 
 _RECAP_MODE = (
@@ -306,9 +303,8 @@ _STORY_EN = (
     "'three o'clock', '2019' -> 'twenty nineteen', '1.5 million' -> 'one and a half "
     "million'. No abbreviations: 'for example' instead of 'e.g.', 'and so on' instead "
     "of 'etc.'. "
-    "NO QUOTES OR BRACKETS: never use quotation marks, brackets, asterisks or stage directions. "
-    "You may add at most one or two fitting emoji per line for subtitle emotion, but never put "
-    "emoji in the HASHTAGS line. The narration is spoken, not acted. Report the dialogue "
+    "NO QUOTES, NO EMOJI, NO BRACKETS: never use quotation marks, emoji, brackets, "
+    "asterisks or stage directions. The narration is spoken, not acted. Report the dialogue "
     "in third person and let the narration carry the emotion through word choice. "
     "FINAL SELF-CHECK for every line: imagine reading it aloud to a friend in a low, "
     "tense voice. If it sounds like a translation, a textbook or a robot, rewrite it the way "
@@ -403,7 +399,7 @@ LANG_CONF = {
             "When a name is unknown never write လူတစ်ယောက် — use a role word or leave the subject out."
         ),
         "font_keys": ("padauk", "myanmar", "pyidaung", "notosansmyanmar", "myanmarpadaung"),
-        "clean": r"[^\u1000-\u109f\uaa60-\uaa7f\ua9e0-\ua9ff\U0001F300-\U0001FAFF\u2600-\u27BF\ufe0f\u200d\s0-9.,!?\"'%\-]",
+        "clean": r"[^\u1000-\u109f\uaa60-\uaa7f\ua9e0-\ua9ff\s0-9.,!?\"'%\-]",
         "is_mm": True,
     },
     "de": {
@@ -434,17 +430,17 @@ LANG_CONF = {
             "characters of the same gender are in the scene."
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
-        "clean": r"[^A-Za-zÄÖÜäöüß\U0001F300-\U0001FAFF\u2600-\u27BF\ufe0f\u200d0-9\s.,!?\"'%\-]",
+        "clean": r"[^A-Za-zÄÖÜäöüß0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
     "en": {
         "name": "English", "label": "အင်္ဂလိပ်",
         "sample": "This is a sample subtitle line.",
         "rate": 5, "trim": TRIM_EN,
-        "edge_voices": [("en-US-AriaNeural", "Aria (female, US)"),
+        "edge_voices": [("en-GB-SoniaNeural", "Sonia (female, UK)"),
+                        ("en-US-AriaNeural", "Aria (female, US)"),
                         ("en-US-GuyNeural", "Guy (male, US)"),
                         ("en-US-JennyNeural", "Jenny (female, US)"),
-                        ("en-GB-SoniaNeural", "Sonia (female, UK)"),
                         ("en-GB-RyanNeural", "Ryan (male, UK)"),
                         ("en-AU-NatashaNeural", "Natasha (female, AU)")],
         "sentence_end": r"(?<=[.!?])\s+",
@@ -465,11 +461,10 @@ LANG_CONF = {
             "other parts. Keep the same tense (simple present), the same DRAMATIC cinematic "
             "tone, and the same mix of short punchy lines with flowing ones. Vary reporting "
             "verbs and sentence openings; 'says' at most once every four lines. Never use "
-            "quotation marks, brackets or stage directions. Use at most one or two fitting emoji "
-            "per line for subtitle emotion, but never put emoji in the HASHTAGS line."
+            "quotation marks, emoji, brackets or stage directions."
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
-        "clean": r"[^A-Za-z\U0001F300-\U0001FAFF\u2600-\u27BF\ufe0f\u200d0-9\s.,!?\"'%\-]",
+        "clean": r"[^A-Za-z0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
     "es": {
@@ -502,7 +497,7 @@ LANG_CONF = {
             "same gender are in the scene."
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
-        "clean": r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\U0001F300-\U0001FAFF\u2600-\u27BF\ufe0f\u200d0-9\s.,!?\"'%\-]",
+        "clean": r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
 }
@@ -606,10 +601,6 @@ def fmt_t(sec):
 def clean_text(text, lang="my"):
     return re.sub(LANG_CONF[lang]["clean"], "", text).strip()
 
-
-def strip_emojis_for_tts(text):
-    """Keep emojis in subtitles, but remove them before sending text to Edge TTS."""
-    return re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\ufe0f\u200d]", "", text).strip()
 
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
@@ -1795,7 +1786,7 @@ def _synthesize(proj, my_list, s, progress, proxy):
     def do_line(i):
         wav = os.path.join(wd, f"a{i:04d}.wav")
         keyf = os.path.join(wd, f"a{i:04d}.key")
-        tts_text = strip_emojis_for_tts(my_list[i])
+        tts_text = my_list[i]
         key = hashlib.md5(f"{sig_base}|{tts_text}".encode()).hexdigest()
         if os.path.exists(wav) and os.path.exists(keyf):
             try:
@@ -2629,7 +2620,8 @@ def launch_ui():
                          bgm_file, bgm_vol, voice_db, duck,
                          height, fps, preset, max_speed, crop, flip, zoom,
                          sub, sub_size, sub_pos, sweep, punch],
-                 [video, dl, status2])
+                 [video, dl, status2], show_progress="hidden",
+                 trigger_mode="once", concurrency_limit=1)
         b3.click(reset_all, pdir_state,
                  [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
                   pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1,
