@@ -2241,7 +2241,7 @@ def launch_ui():
 
     def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size,
                  sub_pos, sweep, pv_t, strict):
-     if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
+        if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
             return gr.skip()
