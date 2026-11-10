@@ -2338,7 +2338,7 @@ def launch_ui():
         # Start the next video with a clean UI/state so the previous video's
         # prompt parts and rendered files cannot remain visible underneath it.
         return (jid, "⏳ စတင်နေတယ်... 0%", gr.Timer(active=True), gr.update(interactive=False),
-                "", [], {}, "", None, None, "", "", "")
+                "", [], {}, "", None, None, "", "")
 
     def poll_step1(jid):
         st = TRANS.get(jid) if jid else None
@@ -2442,7 +2442,7 @@ def launch_ui():
         # stayed visible even though the project state had been deleted.
         return ("", "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး",
                 "", "", gr.Timer(active=False), gr.Timer(active=False),
-                gr.update(interactive=True), "", "")
+                gr.update(interactive=True), "")
 
     def make_setter(lo, hi):
         def f(text, parts):
@@ -2471,14 +2471,20 @@ def launch_ui():
 
         stop = {
             "en": {"the", "and", "that", "this", "with", "from", "when", "then", "they",
-                    "have", "has", "into", "after", "before", "about", "just", "very"},
+                    "have", "has", "into", "after", "before", "about", "just", "very", "their",
+                    "there", "where", "what", "which", "will", "were", "been", "being", "herself",
+                    "himself", "someone", "another", "because"},
             "de": {"der", "die", "das", "und", "dass", "dieser", "diese", "mit", "von",
-                    "wenn", "dann", "sie", "ist", "sich", "nach", "vor", "eine", "ein"},
+                    "wenn", "dann", "sie", "ist", "sich", "nach", "vor", "eine", "ein", "einer",
+                    "einem", "einen", "wird", "werden", "war", "sind", "seine", "ihrer", "dort"},
             "es": {"el", "la", "los", "las", "y", "que", "con", "desde", "cuando", "entonces",
-                    "ellos", "ella", "después", "antes", "una", "un", "por"},
+                    "ellos", "ellas", "ella", "él", "para", "pero", "como", "sobre", "después",
+                    "antes", "una", "un", "por", "sus", "son", "está", "están", "también"},
             "my": {"နဲ့", "က", "မှာ", "ကို", "သည်", "တယ်", "ပါတယ်", "ပြီး", "တော့", "အဲဒီ", "သူတို့"},
         }[code]
-        tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]+", raw.lower())
+        token_pattern = (r"[A-Za-zÀ-ÖØ-öø-ÿ0-9\u1000-\u109F]+" if code == "my"
+                         else r"[A-Za-zÀ-ÖØ-öø-ÿ0-9]+")
+        tokens = re.findall(token_pattern, raw.lower())
         counts = Counter(t for t in tokens if len(t) >= 4 and t not in stop and not t.isdigit())
         topical = []
         for word, _ in counts.most_common():
@@ -2502,6 +2508,13 @@ def launch_ui():
             if len(tags) == 5:
                 break
         return " ".join("#" + tag for tag in tags[:5])
+
+    def make_hashtags_from_parts(parts, translated, lang_name):
+        """Use the Gemini result boxes already filled in the prompt section."""
+        values = [parts[k] for k in sorted(parts or {}) if (parts or {}).get(k)]
+        if translated:
+            values.append(translated)
+        return make_hashtags("\n".join(values), lang_name)
 
     with gr.Blocks(**blocks_kw) as demo:
         gr.Markdown(f"# 🎙️ Recap → my / de / en / es  `v{__version__}`\n"
@@ -2600,12 +2613,7 @@ def launch_ui():
         status2 = gr.Markdown()
         video = gr.Video(label="ရလဒ်", autoplay=True)
         dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲ ဖိုင်များ)", file_count="multiple")
-        gr.Markdown("### #️⃣ AI စာထဲကနေ Hashtag ၅ ခုထုတ်ရန်")
-        hashtag_source = gr.Textbox(
-            label="AI ဆီကရတဲ့ စာကို ဒီမှာ Paste လုပ်ပါ",
-            placeholder="AI result / movie summary ကို ဒီမှာ paste လုပ်ပါ...",
-            lines=4,
-        )
+        gr.Markdown("### #️⃣ Prompt အပိုင်းထဲက Gemini ရလဒ်နဲ့ Hashtag ၅ ခု")
         hashtag_btn = gr.Button("#️⃣ Hashtag ၅ ခုထုတ်")
         hashtag_output = gr.Textbox(
             label="Copy လုပ်ရန် Hashtag ၅ ခု",
@@ -2613,13 +2621,12 @@ def launch_ui():
             interactive=False,
             show_copy_button=True,
         )
-        hashtag_btn.click(make_hashtags, [hashtag_source, lang], hashtag_output)
+        hashtag_btn.click(make_hashtags_from_parts, [parts_state, translated, lang], hashtag_output)
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
         b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
                  [trans_job, status1, trans_timer, b1, pdir_state, chunks_state,
-                  parts_state, translated, video, dl, status2, hashtag_source,
-                  hashtag_output])
+                  parts_state, translated, video, dl, status2, hashtag_output])
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
@@ -2631,7 +2638,7 @@ def launch_ui():
         b3.click(reset_all, pdir_state,
                  [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
                   pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1,
-                  hashtag_source, hashtag_output])
+                  hashtag_output])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
