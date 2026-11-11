@@ -17,6 +17,7 @@ import glob
 import hashlib
 import inspect
 import json
+import math
 import os
 import queue
 import re
@@ -534,6 +535,7 @@ class Settings:
     flip: bool = True
     mirror_every: float = 5.0      # default 5s (hidden from UI)
     zoom: float = 1.0
+    motion: str = "pan_zoom"
     render_workers: int = 4        # default 4  (hidden from UI)
     split: bool = True
     split_min: float = 1.03
@@ -979,6 +981,35 @@ def center_zoom(fr, z):
     x0, y0 = (W - cw) // 2, (H - ch) // 2
     return cv2.resize(fr[y0:y0 + ch, x0:x0 + cw], (W, H), interpolation=cv2.INTER_LINEAR)
 
+
+def motion_view(fr, mode, t, duration, phase=0.0):
+    """Apply a gentle Ken-Burns-style motion without changing the audio timing."""
+    mode = mode or "pan_zoom"
+    if mode == "static":
+        return fr.copy()
+    p = max(0.0, min(float(t) / max(float(duration), 0.1), 1.0))
+    e = p * p * (3.0 - 2.0 * p)
+    if mode == "zoom":
+        z = 1.0 + 0.07 * e
+        dx = dy = 0.0
+    elif mode == "dynamic":
+        z = 1.02 + 0.08 * e
+        a = (phase % 4.0) / 4.0
+        dx = math.sin((p + a) * math.pi * 2.0) * 0.22
+        dy = math.cos((p + a) * math.pi * 2.0) * 0.12
+    else:  # pan_zoom
+        z = 1.06 + 0.03 * e
+        dx = (p * 2.0 - 1.0) * 0.22
+        dy = math.sin(p * math.pi) * 0.10
+    H, W = fr.shape[:2]
+    cw, ch = max(2, int(W / z)), max(2, int(H / z))
+    max_x, max_y = max(0, W - cw), max(0, H - ch)
+    x0 = int(max_x * (0.5 + dx))
+    y0 = int(max_y * (0.5 + dy))
+    x0 = max(0, min(x0, max_x))
+    y0 = max(0, min(y0, max_y))
+    return cv2.resize(fr[y0:y0 + ch, x0:x0 + cw], (W, H), interpolation=cv2.INTER_LINEAR)
+
 def zoom_flip(fr, zoom, flip):
     zoomed = zoom > 1.001
     if zoomed:
@@ -1337,6 +1368,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     W, H = out_size(base_rect, s.height)
     rect = zoom_rect(base_rect, s.zoom)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
+    motion_mode = getattr(s, "motion", "pan_zoom")
 
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
@@ -1443,7 +1475,8 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                             last = apply_view(f, rect, W, H, chunk_mirror, interp)
                     if last is None:
                         return
-                    out_fr = center_zoom(last, pz) if pz > 1.001 else last.copy()
+                    moved = motion_view(last, motion_mode, T - cs, _d, phase=pi)
+                    out_fr = center_zoom(moved, pz) if pz > 1.001 else moved
                     if not put(out_fr):
                         return
             finally:
@@ -1962,6 +1995,7 @@ def add_style_args(p):
     g.add_argument("--preset", choices=["ultrafast", "superfast", "veryfast"], default=SUP)
     g.add_argument("--max-speed", type=float, default=SUP)
     g.add_argument("--zoom", type=float, default=SUP)
+    g.add_argument("--motion", choices=["static", "zoom", "pan_zoom", "dynamic"], default=SUP)
     g.add_argument("--render-workers", type=int, default=SUP)
     g.add_argument("--mirror-every", type=float, default=SUP,
                    help="Mirror ကို ဘယ်နှစ်စက္ကန့်တစ်ခါ လှန်မလဲ · 0 = အမြဲ · -1 = မလုပ်ဘူး (default 5)")
@@ -2001,6 +2035,8 @@ def settings_for(proj, args):
         s.rate = max(-50, min(100, int(s.rate)))
     s.max_speed = max(1.0, min(2.0, s.max_speed))
     s.zoom = max(1.0, min(1.25, s.zoom))
+    if getattr(s, "motion", "pan_zoom") not in {"static", "zoom", "pan_zoom", "dynamic"}:
+        s.motion = "pan_zoom"
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
@@ -2374,7 +2410,7 @@ def launch_ui():
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
               height, fps, preset, max_speed, crop, flip, zoom,
-              sub, sub_size, sub_pos, sweep, punch,
+              motion, sub, sub_size, sub_pos, sweep, punch,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
@@ -2395,6 +2431,7 @@ def launch_ui():
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
+            s.motion = motion if motion in {"static", "zoom", "pan_zoom", "dynamic"} else "pan_zoom"
 
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
@@ -2474,6 +2511,9 @@ def launch_ui():
         code = LANGS[l]
         v = voices_for(code)
         return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
+
+    def render_started():
+        return "⏳ အသံထုတ် + Video ပေါင်းနေတယ်... ခဏစောင့်ပါ"
 
     def extract_hashtags_from_parts(parts, translated, lang_name):
         """Extract only hashtags explicitly returned by AI, never invent keywords."""
@@ -2557,6 +2597,12 @@ def launch_ui():
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
+            motion = gr.Radio(
+                [("ရပ်နေသောပုံ", "static"),
+                 ("Slow Zoom", "zoom"),
+                 ("Slow Pan + Zoom", "pan_zoom"),
+                 ("Dynamic", "dynamic")],
+                value="pan_zoom", label="🖼️ ပုံလှုပ်ရှားမှု")
 
         pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
@@ -2616,11 +2662,12 @@ def launch_ui():
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
-        b2.click(step2, [pdir_state, translated, parts_state, lang, voice, rate, workers,
+        render_inputs = [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
                          height, fps, preset, max_speed, crop, flip, zoom,
-                         sub, sub_size, sub_pos, sweep, punch],
-                 [video, dl, status2])
+                         motion, sub, sub_size, sub_pos, sweep, punch]
+        b2.click(render_started, None, status2, queue=False).then(
+            step2, render_inputs, [video, dl, status2])
         b3.click(reset_all, pdir_state,
                  [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
                   pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1,
