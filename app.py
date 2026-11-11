@@ -535,7 +535,7 @@ class Settings:
     flip: bool = True
     mirror_every: float = 5.0      # default 5s (hidden from UI)
     zoom: float = 1.0
-    motion: str = "pan_zoom"
+    motion: str = "freeze"
     render_workers: int = 4        # default 4  (hidden from UI)
     split: bool = True
     split_min: float = 1.03
@@ -985,7 +985,7 @@ def center_zoom(fr, z):
 def motion_view(fr, mode, t, duration, phase=0.0):
     """Apply a gentle Ken-Burns-style motion without changing the audio timing."""
     mode = mode or "pan_zoom"
-    if mode == "static":
+    if mode in {"static", "freeze"}:
         return fr.copy()
     p = max(0.0, min(float(t) / max(float(duration), 0.1), 1.0))
     e = p * p * (3.0 - 2.0 * p)
@@ -1368,7 +1368,11 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     W, H = out_size(base_rect, s.height)
     rect = zoom_rect(base_rect, s.zoom)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
-    motion_mode = getattr(s, "motion", "pan_zoom")
+    motion_mode = getattr(s, "motion", "freeze")
+    if motion_mode in {"static", "freeze"}:
+        # Fully still modes: no mirror flips and no punch zoom either.
+        s.mirror_every = -1.0
+        s.flip = False
 
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
@@ -1379,7 +1383,8 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
     neon = _neon_for(W, H, s.neon_th, s.neon_speed) if s.neon else None
 
-    punch_on = bool(getattr(s, "punch", False)) and float(s.punch_every) > 0
+    punch_on = (motion_mode not in {"static", "freeze"} and bool(getattr(s, "punch", False))
+                and float(s.punch_every) > 0)
     p_every = float(s.punch_every)
     p_hold = float(s.punch_hold)
     p_zoom = float(s.punch_zoom)
@@ -1459,7 +1464,11 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                         Te = max(Te, cs)      # freeze ဇာတ်ခန်းနယ်မကျော်စေ
                     else:
                         Te, pz = T, 1.0
-                    idx = min(max(int((s0 + (Te - cs) * spd) * sfps + 0.5), 0), stotal - 1)
+                    if motion_mode == "freeze":
+                        # Hold one source frame for the whole narration segment.
+                        idx = min(max(int(s0 * sfps + 0.5), 0), stotal - 1)
+                    else:
+                        idx = min(max(int((s0 + (Te - cs) * spd) * sfps + 0.5), 0), stotal - 1)
                     if idx > cur + 90 or idx < cur:
                         cap_.set(cv2.CAP_PROP_POS_FRAMES, idx)
                         cur = idx - 1
@@ -2035,8 +2044,8 @@ def settings_for(proj, args):
         s.rate = max(-50, min(100, int(s.rate)))
     s.max_speed = max(1.0, min(2.0, s.max_speed))
     s.zoom = max(1.0, min(1.25, s.zoom))
-    if getattr(s, "motion", "pan_zoom") not in {"static", "zoom", "pan_zoom", "dynamic"}:
-        s.motion = "pan_zoom"
+    if getattr(s, "motion", "freeze") not in {"freeze", "static", "zoom", "pan_zoom", "dynamic"}:
+        s.motion = "freeze"
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
@@ -2431,7 +2440,7 @@ def launch_ui():
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
-            s.motion = motion if motion in {"static", "zoom", "pan_zoom", "dynamic"} else "pan_zoom"
+            s.motion = motion if motion in {"freeze", "static", "zoom", "pan_zoom", "dynamic"} else "freeze"
 
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
@@ -2598,11 +2607,12 @@ def launch_ui():
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
             motion = gr.Radio(
-                [("ရပ်နေသောပုံ", "static"),
+                [("ဇာတ်ကောင်မလှုပ် (Still Scene)", "freeze"),
+                 ("ရပ်နေသောပုံ (မူရင်း frame အတိုင်း)", "static"),
                  ("Slow Zoom", "zoom"),
                  ("Slow Pan + Zoom", "pan_zoom"),
                  ("Dynamic", "dynamic")],
-                value="pan_zoom", label="🖼️ ပုံလှုပ်ရှားမှု")
+                value="freeze", label="🖼️ ပုံလှုပ်ရှားမှု")
 
         pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
