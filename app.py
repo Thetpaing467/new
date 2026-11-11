@@ -918,8 +918,6 @@ class Neon:
         fr[self.ys, self.xs] = strip[self.idx]
 
 _NEON_CACHE = {}
-_FACE_CASCADE = None
-_EYE_CASCADE = None
 
 def _neon_for(W, H, th, speed):
     key = (W, H, int(th), float(speed))
@@ -939,59 +937,6 @@ def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR):
     if mirror:
         f = cv2.flip(f, 1)
     return f
-
-
-def _quality_cascades():
-    global _FACE_CASCADE, _EYE_CASCADE
-    if _FACE_CASCADE is None:
-        try:
-            base = cv2.data.haarcascades
-            _FACE_CASCADE = cv2.CascadeClassifier(os.path.join(base, "haarcascade_frontalface_default.xml"))
-            _EYE_CASCADE = cv2.CascadeClassifier(os.path.join(base, "haarcascade_eye_tree_eyeglasses.xml"))
-        except Exception:
-            _FACE_CASCADE = False
-            _EYE_CASCADE = False
-    return _FACE_CASCADE, _EYE_CASCADE
-
-
-def choose_best_frame(cap, center_idx, stotal, sfps):
-    """Choose a clear, preferably eyes-open frame near a narration scene start."""
-    center_idx = max(0, min(int(center_idx), stotal - 1))
-    span = max(1, int(min(2.5, 0.8 + 0.06 * sfps) * sfps))
-    candidates = sorted(set(max(0, min(center_idx + d, stotal - 1))
-                          for d in np.linspace(0, span, 9, dtype=int)))
-    face_cascade, eye_cascade = _quality_cascades()
-    best_idx, best_score = center_idx, -1e18
-    for idx in candidates:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ok, fr = cap.read()
-        if not ok or fr is None:
-            continue
-        gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
-        sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        score = min(sharp, 500.0) * 0.02
-        faces = []
-        if face_cascade is not False:
-            try:
-                faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(40, 40))
-            except Exception:
-                faces = []
-        if len(faces):
-            score += 18.0 + min(len(faces), 3) * 3.0
-            if eye_cascade is not False:
-                for x, y, w, h in faces[:4]:
-                    roi = gray[y:y + int(h * 0.62), x:x + w]
-                    try:
-                        eyes = eye_cascade.detectMultiScale(roi, 1.08, 4, minSize=(8, 8))
-                        score += min(len(eyes), 2) * 16.0
-                    except Exception:
-                        pass
-        mean = float(gray.mean())
-        score += max(0.0, 5.0 - abs(mean - 125.0) / 25.0)
-        if score > best_score:
-            best_idx, best_score = idx, score
-    cap.set(cv2.CAP_PROP_POS_FRAMES, best_idx)
-    return best_idx
 
 def out_size(rect, height):
     H = int(height) // 2 * 2
@@ -1518,7 +1463,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         def producer():
             cur, last = -1, None
             ui = 0
-            scene_ui = -1
             T0 = j0 / fps_out
             while ui < len(plan) - 1 and T0 >= plan[ui + 1][0]:
                 ui += 1
@@ -1537,11 +1481,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                         Te, pz = T, 1.0
                     if motion_mode in still_modes:
                         # Hold one source frame for the whole narration segment.
-                        if scene_ui != ui:
-                            scene_ui = ui
-                            idx = choose_best_frame(cap_, int(s0 * sfps + 0.5), stotal, sfps)
-                        else:
-                            idx = cur if cur >= 0 else min(max(int(s0 * sfps + 0.5), 0), stotal - 1)
+                        idx = min(max(int(s0 * sfps + 0.5), 0), stotal - 1)
                     else:
                         idx = min(max(int((s0 + (Te - cs) * spd) * sfps + 0.5), 0), stotal - 1)
                     if idx > cur + 90 or idx < cur:
@@ -2688,7 +2628,15 @@ def launch_ui():
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
             motion = gr.Radio(
-                [("Still + All Effects", "freeze_all")],
+                [("ဇာတ်ကောင်မလှုပ် (Still Scene)", "freeze"),
+                 ("Still + All Effects", "freeze_all"),
+                 ("Still + Zoom In", "freeze_zoom_in"),
+                 ("Still + Zoom Out", "freeze_zoom_out"),
+                 ("Still + Zoom In-Out", "freeze_zoom_inout"),
+                 ("ရပ်နေသောပုံ (မူရင်း frame အတိုင်း)", "static"),
+                 ("Slow Zoom", "zoom"),
+                 ("Slow Pan + Zoom", "pan_zoom"),
+                 ("Dynamic", "dynamic")],
                 value="freeze_all", label="🖼️ ပုံလှုပ်ရှားမှု")
 
         pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
@@ -2779,4 +2727,4 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         launch_ui()
     else:
-        main()
+           main()
