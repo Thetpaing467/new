@@ -535,7 +535,7 @@ class Settings:
     flip: bool = True
     mirror_every: float = 5.0      # default 5s (hidden from UI)
     zoom: float = 1.0
-    motion: str = "freeze"
+    motion: str = "freeze_all"
     render_workers: int = 4        # default 4  (hidden from UI)
     split: bool = True
     split_min: float = 1.03
@@ -989,7 +989,19 @@ def motion_view(fr, mode, t, duration, phase=0.0):
         return fr.copy()
     p = max(0.0, min(float(t) / max(float(duration), 0.1), 1.0))
     e = p * p * (3.0 - 2.0 * p)
-    if mode == "zoom":
+    if mode == "freeze_all":
+        # Cycle through every still-frame zoom effect from scene to scene.
+        mode = ("freeze_zoom_in", "freeze_zoom_out", "freeze_zoom_inout")[int(phase) % 3]
+    if mode in {"freeze_zoom_in", "freeze_zoom_out", "freeze_zoom_inout"}:
+        # The source frame is already frozen; only its scale changes.
+        if mode == "freeze_zoom_in":
+            z = 1.0 + 0.12 * e
+        elif mode == "freeze_zoom_out":
+            z = 1.12 - 0.12 * e
+        else:
+            z = 1.0 + 0.10 * math.sin(math.pi * p)
+        dx = dy = 0.0
+    elif mode == "zoom":
         z = 1.0 + 0.07 * e
         dx = dy = 0.0
     elif mode == "dynamic":
@@ -1368,8 +1380,11 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     W, H = out_size(base_rect, s.height)
     rect = zoom_rect(base_rect, s.zoom)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
-    motion_mode = getattr(s, "motion", "freeze")
-    if motion_mode in {"static", "freeze"}:
+    motion_mode = getattr(s, "motion", "freeze_all")
+    still_modes = {
+        "static", "freeze", "freeze_all", "freeze_zoom_in", "freeze_zoom_out", "freeze_zoom_inout"
+    }
+    if motion_mode in still_modes:
         # Fully still modes: no mirror flips and no punch zoom either.
         s.mirror_every = -1.0
         s.flip = False
@@ -1383,7 +1398,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
     neon = _neon_for(W, H, s.neon_th, s.neon_speed) if s.neon else None
 
-    punch_on = (motion_mode not in {"static", "freeze"} and bool(getattr(s, "punch", False))
+    punch_on = (motion_mode not in still_modes and bool(getattr(s, "punch", False))
                 and float(s.punch_every) > 0)
     p_every = float(s.punch_every)
     p_hold = float(s.punch_hold)
@@ -1464,7 +1479,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                         Te = max(Te, cs)      # freeze ဇာတ်ခန်းနယ်မကျော်စေ
                     else:
                         Te, pz = T, 1.0
-                    if motion_mode == "freeze":
+                    if motion_mode in still_modes:
                         # Hold one source frame for the whole narration segment.
                         idx = min(max(int(s0 * sfps + 0.5), 0), stotal - 1)
                     else:
@@ -1484,7 +1499,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                             last = apply_view(f, rect, W, H, chunk_mirror, interp)
                     if last is None:
                         return
-                    moved = motion_view(last, motion_mode, T - cs, _d, phase=pi)
+                    moved = motion_view(last, motion_mode, T - cs, _d, phase=ui)
                     out_fr = center_zoom(moved, pz) if pz > 1.001 else moved
                     if not put(out_fr):
                         return
@@ -2044,8 +2059,11 @@ def settings_for(proj, args):
         s.rate = max(-50, min(100, int(s.rate)))
     s.max_speed = max(1.0, min(2.0, s.max_speed))
     s.zoom = max(1.0, min(1.25, s.zoom))
-    if getattr(s, "motion", "freeze") not in {"freeze", "static", "zoom", "pan_zoom", "dynamic"}:
-        s.motion = "freeze"
+    if getattr(s, "motion", "freeze_all") not in {
+        "freeze", "static", "freeze_all", "freeze_zoom_in", "freeze_zoom_out", "freeze_zoom_inout",
+        "zoom", "pan_zoom", "dynamic"
+    }:
+        s.motion = "freeze_all"
     s.sub_size = max(3.0, min(12.0, s.sub_size))
     s.sub_pos = max(0, min(100, s.sub_pos))
     s.voice_db = max(-10.0, min(15.0, float(s.voice_db)))
@@ -2440,7 +2458,10 @@ def launch_ui():
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.fps, s.preset = int(height), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
-            s.motion = motion if motion in {"freeze", "static", "zoom", "pan_zoom", "dynamic"} else "freeze"
+            s.motion = motion if motion in {
+                "freeze", "static", "freeze_all", "freeze_zoom_in", "freeze_zoom_out", "freeze_zoom_inout",
+                "zoom", "pan_zoom", "dynamic"
+            } else "freeze_all"
 
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
@@ -2608,11 +2629,15 @@ def launch_ui():
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
             motion = gr.Radio(
                 [("ဇာတ်ကောင်မလှုပ် (Still Scene)", "freeze"),
+                 ("Still + All Effects", "freeze_all"),
+                 ("Still + Zoom In", "freeze_zoom_in"),
+                 ("Still + Zoom Out", "freeze_zoom_out"),
+                 ("Still + Zoom In-Out", "freeze_zoom_inout"),
                  ("ရပ်နေသောပုံ (မူရင်း frame အတိုင်း)", "static"),
                  ("Slow Zoom", "zoom"),
                  ("Slow Pan + Zoom", "pan_zoom"),
                  ("Dynamic", "dynamic")],
-                value="freeze", label="🖼️ ပုံလှုပ်ရှားမှု")
+                value="freeze_all", label="🖼️ ပုံလှုပ်ရှားမှု")
 
         pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
         fetch_job = gr.State("")
