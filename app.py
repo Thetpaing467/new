@@ -1946,6 +1946,16 @@ def apply_translation(proj, text, lang):
     proj.save()
     return len(got), missing
 
+def _nara_tempo_filter(rate):
+    """Map Edge-style percentage rate to FFmpeg atempo speed.
+
+    Edge rate +45% becomes 1.45x, and -50% becomes 0.50x.
+    The settings validator already limits rate to -50..100.
+    """
+    speed = max(0.5, min(2.0, 1.0 + (float(rate) / 100.0)))
+    return f"atempo={speed:.4f}"
+
+
 def _synthesize(proj, my_list, s, progress, proxy):
     wd = proj.path
     n = len(my_list)
@@ -1978,7 +1988,12 @@ def _synthesize(proj, my_list, s, progress, proxy):
                 if attempt == 3:
                     raise RuntimeError(f"{backend} TTS မအောင်မြင်ပါ (#{i}): {ex}\n{tts_text}")
                 time.sleep(1.5)
-        sh(["ffmpeg", "-y", "-i", raw_audio, "-af", trim_filter,
+        # Edge TTS applies rate inside the synthesizer. Nara does not, so
+        # apply the same percentage as an FFmpeg tempo filter after synthesis.
+        audio_filter = trim_filter
+        if backend == "nara":
+            audio_filter = _nara_tempo_filter(s.resolved_rate()) + "," + trim_filter
+        sh(["ffmpeg", "-y", "-i", raw_audio, "-af", audio_filter,
             "-ar", "44100", "-ac", "1", wav])
         with open(keyf, "w") as kf:
             kf.write(key)
@@ -2688,7 +2703,7 @@ def launch_ui():
 
     with gr.Blocks(**blocks_kw) as demo:
         gr.Markdown(f"# 🎙️ Recap → my / de / en / es / ja  `v{__version__}`\n"
-                    f"Whisper → Gemini → TTS (Edge / Nara offline) → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=1.03min")
+                    f"Whisper → Gemini → TTS (Edge / Nara offline, shared speed control) → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
         fps = gr.State(24)
@@ -2704,7 +2719,7 @@ def launch_ui():
             voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="TTS voice (Edge / Nara offline)")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
-                                 label="Edge speed %")
+                                 label="အသံမြန်နှုန်း (Edge / Nara) %")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
             max_speed = gr.Radio([("1.25× (သဘာဝကျ၊ ဇာတ်ခန်း ပိုပျောက်)", 1.25),
                                   ("1.5× (ဇာတ်ခန်း ပိုပါ၊ ပိုမြန်)", 1.5)],
