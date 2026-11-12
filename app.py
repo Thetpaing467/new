@@ -1330,6 +1330,7 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
 
 
 _NARA_CACHE = {}
+_NARA_LOCK = threading.Lock()
 
 
 def _nara_synthesize_cached(model_dir, voice_id, text, threads=2):
@@ -1341,31 +1342,37 @@ def _nara_synthesize_cached(model_dir, voice_id, text, threads=2):
     key = (model_dir, voice_id, int(threads))
     engine = _NARA_CACHE.get(key)
     if engine is None:
-        script = os.path.join(model_dir, "synthesize.py")
-        # synthesize.py imports the bundled `frontend` package. The previous
-        # subprocess version got this automatically from cwd; the cached
-        # in-process version must add the model directory explicitly.
-        if model_dir not in sys.path:
-            sys.path.insert(0, model_dir)
-        spec = importlib.util.spec_from_file_location("_nara_frontend", script)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        voice_dir = Path(model_dir) / "onnx" / voice_id
-        metadata = json.loads((voice_dir / "voice.json").read_text(encoding="utf-8"))
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = int(threads)
-        options.inter_op_num_threads = 1
-        engine = {
-            "module": module,
-            "meta": metadata,
-            "encoder": ort.InferenceSession(
-                str(voice_dir / "encoder.onnx"), options,
-                providers=["CPUExecutionProvider"]),
-            "decoder": ort.InferenceSession(
-                str(voice_dir / "decoder.onnx"), options,
-                providers=["CPUExecutionProvider"]),
-        }
-        _NARA_CACHE[key] = engine
+        # Multiple TTS workers may initialize the same voice at once. Keep the
+        # check outside the lock for the fast path, then re-check inside it.
+        with _NARA_LOCK:
+            engine = _NARA_CACHE.get(key)
+            if engine is None:
+                script = os.path.join(model_dir, "synthesize.py")
+                # synthesize.py imports the bundled `frontend` package. The previous
+                # subprocess version got this automatically from cwd; the cached
+                # in-process version must add the model directory explicitly.
+                if model_dir not in sys.path:
+                    sys.path.insert(0, model_dir)
+                spec = importlib.util.spec_from_file_location("_nara_frontend", script)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                voice_dir = Path(model_dir) / "onnx" / voice_id
+                metadata = json.loads((voice_dir / "voice.json").read_text(encoding="utf-8"))
+                options = ort.SessionOptions()
+                options.intra_op_num_threads = int(threads)
+                options.inter_op_num_threads = 1
+                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                engine = {
+                    "module": module,
+                    "meta": metadata,
+                    "encoder": ort.InferenceSession(
+                        str(voice_dir / "encoder.onnx"), options,
+                        providers=["CPUExecutionProvider"]),
+                    "decoder": ort.InferenceSession(
+                        str(voice_dir / "decoder.onnx"), options,
+                        providers=["CPUExecutionProvider"]),
+                }
+                _NARA_CACHE[key] = engine
 
     module, meta = engine["module"], engine["meta"]
     if not text.strip():
@@ -1963,9 +1970,15 @@ def _synthesize(proj, my_list, s, progress, proxy):
     durs = [0.0] * n
     done = 0
     progress(0.0, f"အသံ ထုတ်နေတယ် 0/{n}")
-    # The local ONNX model is CPU-bound; avoid launching eight heavyweight
-    # inference processes when an offline Nara voice is selected.
-    workers = 1 if backend == "nara" else max(1, s.tts_workers)
+    # Nara uses one cached ONNX model per voice. Split available CPU capacity
+    # between workers and ONNX intra-op threads instead of serializing all lines.
+    if backend == "nara":
+        cpu = os.cpu_count() or 4
+        requested = int(os.environ.get("NARA_WORKERS", max(2, cpu // 2)))
+        workers = max(1, min(requested, n))
+        os.environ.setdefault("NARA_THREADS", str(max(1, cpu // workers)))
+    else:
+        workers = max(1, s.tts_workers)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [pool.submit(do_line, i) for i in range(n)]
         try:
