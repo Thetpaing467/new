@@ -1329,6 +1329,71 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
     asyncio.run(run())
 
 
+_NARA_CACHE = {}
+
+
+def _nara_synthesize_cached(model_dir, voice_id, text, threads=2):
+    """Synthesize with one persistent ONNX encoder/decoder per voice."""
+    import importlib.util
+    import onnxruntime as ort
+    from pathlib import Path
+
+    key = (model_dir, voice_id, int(threads))
+    engine = _NARA_CACHE.get(key)
+    if engine is None:
+        script = os.path.join(model_dir, "synthesize.py")
+        spec = importlib.util.spec_from_file_location("_nara_frontend", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        voice_dir = Path(model_dir) / "onnx" / voice_id
+        metadata = json.loads((voice_dir / "voice.json").read_text(encoding="utf-8"))
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = int(threads)
+        options.inter_op_num_threads = 1
+        engine = {
+            "module": module,
+            "meta": metadata,
+            "encoder": ort.InferenceSession(
+                str(voice_dir / "encoder.onnx"), options,
+                providers=["CPUExecutionProvider"]),
+            "decoder": ort.InferenceSession(
+                str(voice_dir / "decoder.onnx"), options,
+                providers=["CPUExecutionProvider"]),
+        }
+        _NARA_CACHE[key] = engine
+
+    module, meta = engine["module"], engine["meta"]
+    if not text.strip():
+        raise ValueError("Text must contain speech")
+    text = module.verbalize(text)
+    audio = []
+    for piece in module.split_speech(text):
+        chars = module.phonemize(module.to_tokens(module.prepare_names(piece)))
+        tokens = [meta["vocab"][char] for char in chars if char in meta["vocab"]]
+        if not tokens:
+            raise ValueError("A passage produced no phonemes")
+        if len(tokens) > 508:
+            raise ValueError("A passage exceeds the phoneme context limit")
+        index = int(np.argmin(np.abs(np.asarray(meta["centers"]) - len(tokens))))
+        style = np.asarray([meta["styles"][index]], dtype=np.float32)
+        durations, prosody, encoded_text = engine["encoder"].run(
+            ["durations", "prosody", "text"],
+            {"tokens": np.asarray([[0, *tokens, 0]], dtype=np.int64), "style": style})
+        if durations.min() < 1 or not 1 <= durations.sum() <= 20000:
+            raise ValueError("Invalid predicted duration")
+        samples = engine["decoder"].run(None, {
+            "prosody": np.repeat(prosody, durations[0], axis=2),
+            "text": np.repeat(encoded_text, durations[0], axis=2),
+            "style": style,
+        })[0].reshape(-1)
+        if samples.size < 2400 or not np.isfinite(samples).all():
+            raise ValueError("The model produced invalid audio")
+        if audio:
+            audio.append(np.zeros(4800, dtype=np.float32))
+        audio.append(samples)
+    return np.clip(np.concatenate(audio), -1, 1)
+
+
 def tts_nara(text, voice, output_wav):
     """Run YeeNyunn/nara-mini-v1 locally through its bundled ONNX synthesizer."""
     model_dir = os.path.abspath(os.environ.get("NARA_MODEL_DIR", "nara-mini-v1"))
@@ -1353,12 +1418,14 @@ def tts_nara(text, voice, output_wav):
     if not os.path.isfile(script):
         raise RuntimeError(f"Nara model download ပြီးသော်လည်း synthesize.py မတွေ့ပါ: {script}")
     output_wav = os.path.abspath(output_wav)
-    cmd = [sys.executable, "synthesize.py", "--voice", voice_id, "--text", text,
-           "--output", output_wav, "--threads", os.environ.get("NARA_THREADS", "2")]
     try:
-        subprocess.run(cmd, cwd=model_dir, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as ex:
-        detail = (ex.stderr or ex.stdout or str(ex)).strip()[-800:]
+        samples = _nara_synthesize_cached(
+            model_dir, voice_id, text, int(os.environ.get("NARA_THREADS", "2")))
+        with wave.open(output_wav, "wb") as out:
+            out.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+            out.writeframes((samples * 32767).astype(np.int16).tobytes())
+    except Exception as ex:
+        detail = str(ex).strip()[-800:]
         raise RuntimeError(f"Nara offline TTS မအောင်မြင်ပါ: {detail}") from ex
     if not os.path.isfile(output_wav) or os.path.getsize(output_wav) < 1000:
         raise RuntimeError("Nara offline TTS က audio ဖိုင်မထုတ်နိုင်ပါ")
