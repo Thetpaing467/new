@@ -1335,10 +1335,24 @@ def tts_nara(text, voice, output_wav):
     script = os.path.join(model_dir, "synthesize.py")
     voice_id = voice.split(":", 1)[1] if voice.startswith("nara:") else voice
     if not os.path.isfile(script):
-        raise RuntimeError(
-            "Nara offline model မတွေ့ပါ။ NARA_MODEL_DIR ကို nara-mini-v1 folder သို့ "
-            "ညွှန်ပြီး model ကို အရင် download/install လုပ်ပါ။"
-        )
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id="YeeNyunn/nara-mini-v1",
+                local_dir=model_dir,
+                allow_patterns=[
+                    "synthesize.py", "requirements.txt", "config.json",
+                    "inference_config.json", "frontend/*", "onnx/*/*",
+                ],
+            )
+            script = os.path.join(model_dir, "synthesize.py")
+        except Exception as ex:
+            raise RuntimeError(
+                "Nara offline model မတွေ့ပါ။ Auto-download မအောင်မြင်ပါ: "
+                f"{str(ex)[-500:]}"
+            ) from ex
+    if not os.path.isfile(script):
+        raise RuntimeError("Nara model download ပြီးသော်လည်း synthesize.py မတွေ့ပါ")
     cmd = [sys.executable, script, "--voice", voice_id, "--text", text,
            "--output", output_wav, "--threads", os.environ.get("NARA_THREADS", "2")]
     try:
