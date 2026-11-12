@@ -1,6 +1,6 @@
 """Recap CLI (slim): Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render -> auto split.
 
-Languages: Burmese (my) / German (de) / English (en) / Spanish (es)
+Languages: Burmese (my) / German (de) / English (en) / Spanish (es) / Japanese (ja)
 Sources: YouTube / TikTok (yt-dlp), Rednote, local file
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
@@ -378,8 +378,12 @@ LANG_CONF = {
         "name": "Burmese", "label": "မြန်မာ",
         "sample": "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။",
         "rate": 45, "trim": TRIM,
-        "edge_voices": [("my-MM-ThihaNeural", "Thiha (male)"),
-                        ("my-MM-NilarNeural", "Nilar (female)")],
+        "edge_voices": [("my-MM-ThihaNeural", "Thiha (male, online)"),
+                        ("my-MM-NilarNeural", "Nilar (female, online)"),
+                        ("nara:shoon", "Shoon (Burmese, offline)"),
+                        ("nara:thazin", "Thazin (Burmese, offline)"),
+                        ("nara:ko-banyar", "Ko Banyar (Burmese, offline)"),
+                        ("nara:htet-myat", "Htet Myat (Burmese, offline)")],
         "sentence_end": r"(?<=။)",
         "prompt": (
             "You are a Burmese (Myanmar) movie/drama recap narrator. Turn every numbered "
@@ -500,6 +504,42 @@ LANG_CONF = {
         "clean": r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\s.,!?\"'%\-]",
         "is_mm": False,
     },
+    "ja": {
+        "name": "Japanese", "label": "ဂျပန်",
+        "sample": "これは字幕のサンプルです。",
+        "rate": 5, "trim": TRIM,
+        "edge_voices": [
+            ("ja-JP-NanamiNeural", "Nanami (female)"),
+            ("ja-JP-KeitaNeural", "Keita (male)"),
+            ("ja-JP-AoiNeural", "Aoi (female)"),
+            ("ja-JP-DaichiNeural", "Daichi (male)"),
+        ],
+        "sentence_end": r"(?<=[。！？!?])",
+        "prompt": (
+            "You are a native Japanese storyteller who retells TV dramas to viewers in a recap "
+            "video. Rewrite every numbered line below as natural, spoken Japanese — not a literal "
+            "translation and not a subtitle file. Use clear, modern Japanese that sounds natural "
+            "when read aloud. "
+            + _tail(
+                script="use natural Japanese with kanji, hiragana and katakana; keep character "
+                       "names consistent and do not use Burmese or Chinese source text.",
+                accent=("Speak clear, natural Japanese for a movie-recap narration. Use polite but "
+                        "conversational wording, natural pauses with Japanese punctuation, and keep "
+                        "the emotion of the scene."),
+                story=("日本語の映画・ドラマ紹介ナレーションとして書く。会話をそのまま引用せず、 "
+                       "誰が誰に何を言ったのかを三人称で自然に説明する。時制は基本的に現在形にし、 "
+                       "名前と人物の関係を一貫させる。")
+            )
+        ),
+        "chunk_note": (
+            _RECAP_NOTE +
+            "Keep the same natural Japanese recap voice and the same spellings for all character "
+            "names across every part. Do not use quotation marks, emoji, brackets or stage directions."
+        ),
+        "font_keys": ("notosanscjk", "noto", "japan", "gothic", "ipa", "takao", "msgothic"),
+        "clean": r"[^A-Za-z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u3000-\u303f\s.,!?\"'%-]",
+        "is_mm": False,
+    },
 }
 
 LANG_ALIASES = {c["label"]: k for k, c in LANG_CONF.items()}
@@ -513,7 +553,7 @@ def resolve_lang(value):
         return LANG_ALIASES[v]
     if v.lower() in LANG_ALIASES:
         return LANG_ALIASES[v.lower()]
-    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de / en / es)")
+    raise ValueError(f"မသိတဲ့ ဘာသာစကား: {value} (my / de / en / es / ja)")
 
 @dataclass
 class Settings:
@@ -1288,6 +1328,27 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
 
     asyncio.run(run())
 
+
+def tts_nara(text, voice, output_wav):
+    """Run YeeNyunn/nara-mini-v1 locally through its bundled ONNX synthesizer."""
+    model_dir = os.environ.get("NARA_MODEL_DIR", "nara-mini-v1")
+    script = os.path.join(model_dir, "synthesize.py")
+    voice_id = voice.split(":", 1)[1] if voice.startswith("nara:") else voice
+    if not os.path.isfile(script):
+        raise RuntimeError(
+            "Nara offline model မတွေ့ပါ။ NARA_MODEL_DIR ကို nara-mini-v1 folder သို့ "
+            "ညွှန်ပြီး model ကို အရင် download/install လုပ်ပါ။"
+        )
+    cmd = [sys.executable, script, "--voice", voice_id, "--text", text,
+           "--output", output_wav, "--threads", os.environ.get("NARA_THREADS", "2")]
+    try:
+        subprocess.run(cmd, cwd=model_dir, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as ex:
+        detail = (ex.stderr or ex.stdout or str(ex)).strip()[-800:]
+        raise RuntimeError(f"Nara offline TTS မအောင်မြင်ပါ: {detail}") from ex
+    if not os.path.isfile(output_wav) or os.path.getsize(output_wav) < 1000:
+        raise RuntimeError("Nara offline TTS က audio ဖိုင်မထုတ်နိုင်ပါ")
+
 # ======================================================================
 # render
 # ======================================================================
@@ -1780,7 +1841,8 @@ def _synthesize(proj, my_list, s, progress, proxy):
     n = len(my_list)
     voice = s.resolved_voice()
     trim_filter = LANG_CONF[s.lang].get("trim", TRIM)
-    sig_base = f"edge|{voice}|{s.rate_str()}|noref|{trim_filter}"
+    backend = "nara" if voice.startswith("nara:") else "edge"
+    sig_base = f"{backend}|{voice}|{s.rate_str()}|noref|{trim_filter}"
 
     def do_line(i):
         wav = os.path.join(wd, f"a{i:04d}.wav")
@@ -1794,14 +1856,17 @@ def _synthesize(proj, my_list, s, progress, proxy):
                         return i, wav_dur(wav)
             except Exception:
                 pass
-        raw_audio = os.path.join(wd, f"a{i:04d}_raw.mp3")
+        raw_audio = os.path.join(wd, f"a{i:04d}_raw.{'wav' if backend == 'nara' else 'mp3'}")
         for attempt in range(4):
             try:
-                tts_edge(tts_text, voice, s.rate_str(), raw_audio, proxy)
+                if backend == "nara":
+                    tts_nara(tts_text, voice, raw_audio)
+                else:
+                    tts_edge(tts_text, voice, s.rate_str(), raw_audio, proxy)
                 break
             except Exception as ex:
                 if attempt == 3:
-                    raise RuntimeError(f"Edge TTS မအောင်မြင်ပါ (#{i}): {ex}\n{tts_text}")
+                    raise RuntimeError(f"{backend} TTS မအောင်မြင်ပါ (#{i}): {ex}\n{tts_text}")
                 time.sleep(1.5)
         sh(["ffmpeg", "-y", "-i", raw_audio, "-af", trim_filter,
             "-ar", "44100", "-ac", "1", wav])
@@ -1812,7 +1877,10 @@ def _synthesize(proj, my_list, s, progress, proxy):
     durs = [0.0] * n
     done = 0
     progress(0.0, f"အသံ ထုတ်နေတယ် 0/{n}")
-    with ThreadPoolExecutor(max_workers=max(1, s.tts_workers)) as pool:
+    # The local ONNX model is CPU-bound; avoid launching eight heavyweight
+    # inference processes when an offline Nara voice is selected.
+    workers = 1 if backend == "nara" else max(1, s.tts_workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [pool.submit(do_line, i) for i in range(n)]
         try:
             for fu in as_completed(futs):
@@ -1945,7 +2013,7 @@ SUP = argparse.SUPPRESS
 
 def add_style_args(p):
     g = p.add_argument_group("voice / language")
-    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en | es")
+    g.add_argument("--lang", type=resolve_lang, default=SUP, help="my | de | en | es | ja")
     g.add_argument("--voice", default=SUP)
     g.add_argument("--rate", type=int, default=SUP)
     g.add_argument("--workers", dest="tts_workers", type=int, default=SUP)
@@ -2171,7 +2239,7 @@ def launch_ui():
     BASE = os.path.join(os.getcwd(), "work_ui")
     os.makedirs(BASE, exist_ok=True)
     PORT = int(os.environ.get("PORT", "7860"))
-    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en", "စပိန်": "es"}
+    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en", "စပိန်": "es", "ဂျပန်": "ja"}
 
     def voices_for(code):
         return [v for v, _ in LANG_CONF[code]["edge_voices"]]
@@ -2222,7 +2290,7 @@ def launch_ui():
 </script>
 """
     ui_kw = {
-        "title": "Recap → my / de / en / es",
+        "title": "Recap → my / de / en / es / ja",
         "theme": gr.themes.Base(primary_hue="indigo", secondary_hue="purple", neutral_hue="slate"),
         "css": ":root, html, body, gradio-app { color-scheme: dark; }"
                " body, gradio-app, .gradio-container { background: #0b0f19 !important; }"
@@ -2504,8 +2572,8 @@ def launch_ui():
         return " ".join("#" + tag for tag in tags)
 
     with gr.Blocks(**blocks_kw) as demo:
-        gr.Markdown(f"# 🎙️ Recap → my / de / en / es  `v{__version__}`\n"
-                    f"Whisper → Gemini → Edge TTS → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=1.03min")
+        gr.Markdown(f"# 🎙️ Recap → my / de / en / es / ja  `v{__version__}`\n"
+                    f"Whisper → Gemini → TTS (Edge / Nara offline) → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
         fps = gr.State(24)
@@ -2518,7 +2586,7 @@ def launch_ui():
 
         with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
             lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
-            voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="Edge voice")
+            voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="TTS voice (Edge / Nara offline)")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="Edge speed %")
