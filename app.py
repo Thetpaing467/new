@@ -1329,51 +1329,54 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
     asyncio.run(run())
 
 
-_NARA_CACHE = {}
 _NARA_LOCK = threading.Lock()
+_NARA_SHARED = {}
+_NARA_TLS = threading.local()
 
 
-def _nara_synthesize_cached(model_dir, voice_id, text, threads=2):
-    """Synthesize with one persistent ONNX encoder/decoder per voice."""
+def _nara_engine(model_dir, voice_id, threads):
     import importlib.util
     import onnxruntime as ort
     from pathlib import Path
 
+    cache = getattr(_NARA_TLS, "cache", None)
+    if cache is None:
+        cache = _NARA_TLS.cache = {}
     key = (model_dir, voice_id, int(threads))
-    engine = _NARA_CACHE.get(key)
-    if engine is None:
-        # Multiple TTS workers may initialize the same voice at once. Keep the
-        # check outside the lock for the fast path, then re-check inside it.
-        with _NARA_LOCK:
-            engine = _NARA_CACHE.get(key)
-            if engine is None:
-                script = os.path.join(model_dir, "synthesize.py")
-                # synthesize.py imports the bundled `frontend` package. The previous
-                # subprocess version got this automatically from cwd; the cached
-                # in-process version must add the model directory explicitly.
-                if model_dir not in sys.path:
-                    sys.path.insert(0, model_dir)
-                spec = importlib.util.spec_from_file_location("_nara_frontend", script)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                voice_dir = Path(model_dir) / "onnx" / voice_id
-                metadata = json.loads((voice_dir / "voice.json").read_text(encoding="utf-8"))
-                options = ort.SessionOptions()
-                options.intra_op_num_threads = int(threads)
-                options.inter_op_num_threads = 1
-                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-                engine = {
-                    "module": module,
-                    "meta": metadata,
-                    "encoder": ort.InferenceSession(
-                        str(voice_dir / "encoder.onnx"), options,
-                        providers=["CPUExecutionProvider"]),
-                    "decoder": ort.InferenceSession(
-                        str(voice_dir / "decoder.onnx"), options,
-                        providers=["CPUExecutionProvider"]),
-                }
-                _NARA_CACHE[key] = engine
+    if key in cache:
+        return cache[key]
 
+    voice_dir = Path(model_dir) / "onnx" / voice_id
+    with _NARA_LOCK:
+        shared = _NARA_SHARED.get((model_dir, voice_id))
+        if shared is None:
+            if model_dir not in sys.path:
+                sys.path.insert(0, model_dir)
+            spec = importlib.util.spec_from_file_location(
+                "_nara_frontend", os.path.join(model_dir, "synthesize.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            meta = json.loads((voice_dir / "voice.json").read_text(encoding="utf-8"))
+            shared = _NARA_SHARED[(model_dir, voice_id)] = (module, meta)
+    module, meta = shared
+
+    opt = ort.SessionOptions()
+    opt.intra_op_num_threads = int(threads)
+    opt.inter_op_num_threads = 1
+    opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    eng = {
+        "module": module, "meta": meta,
+        "encoder": ort.InferenceSession(str(voice_dir / "encoder.onnx"), opt,
+                                        providers=["CPUExecutionProvider"]),
+        "decoder": ort.InferenceSession(str(voice_dir / "decoder.onnx"), opt,
+                                        providers=["CPUExecutionProvider"]),
+    }
+    cache[key] = eng
+    return eng
+
+
+def _nara_synthesize_cached(model_dir, voice_id, text, threads=2):
+    engine = _nara_engine(model_dir, voice_id, threads)
     module, meta = engine["module"], engine["meta"]
     if not text.strip():
         raise ValueError("Text must contain speech")
@@ -1432,7 +1435,7 @@ def tts_nara(text, voice, output_wav):
     output_wav = os.path.abspath(output_wav)
     try:
         samples = _nara_synthesize_cached(
-            model_dir, voice_id, text, int(os.environ.get("NARA_THREADS", "2")))
+            model_dir, voice_id, text, int(os.environ.get("NARA_THREADS", "1")))
         with wave.open(output_wav, "wb") as out:
             out.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
             out.writeframes((samples * 32767).astype(np.int16).tobytes())
@@ -1489,6 +1492,10 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     auto = detect_crop(src) if s.crop else None
     base_rect = resolve_crop(src_w, src_h, s, auto)
     W, H = out_size(base_rect, s.height)
+    # rawvideo/yuv420p encoders require positive even dimensions. Keep the
+    # invariant here even if a crop detector returns unusual dimensions.
+    W = max(2, int(W) // 2 * 2)
+    H = max(2, int(H) // 2 * 2)
     rect = zoom_rect(base_rect, s.zoom)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
     mirror_every = float(s.mirror_every)
@@ -1561,6 +1568,8 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                     continue
             return False
 
+        producer_error = []
+
         def producer():
             cur, last = -1, None
             ui = 0
@@ -1595,10 +1604,14 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                         if ok:
                             last = apply_view(f, rect, W, H, chunk_mirror, interp)
                     if last is None:
-                        return
+                        raise RuntimeError(
+                            f"source frame မဖတ်နိုင်ပါ (frame {idx}, chunk {pi})")
                     out_fr = center_zoom(last, pz) if pz > 1.001 else last.copy()
                     if not put(out_fr):
                         return
+            except BaseException as ex:
+                producer_error.append(ex)
+                abort.set()
             finally:
                 while not lstop.is_set():
                     try:
@@ -1614,7 +1627,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-an",
                "-c:v", "libx264", "-preset", s.preset, "-crf", "27",
                "-tune", "zerolatency",
-               "-x264-params", "ref=1:bframes=0:scenecut=0:rc-lookahead=10:threads=" + str(per_threads),
+               "-x264-params", "ref=1:bframes=0:scenecut=0:rc-lookahead=10",
                "-pix_fmt", "yuv420p", "-threads", str(per_threads), parts[pi]]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                 stderr=log_fh)
@@ -1675,13 +1688,17 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                 pass
             log_fh.close()
 
+        if abort.is_set() and producer_error:
+            raise RuntimeError(f"render chunk {pi}: frame producer fail\n{producer_error[0]}")
         if abort.is_set():
             return
         if proc.returncode != 0 or j != j1:
             with open(log_path, "rb") as f:
-                tail = f.read()[-800:].decode("utf-8", "ignore")
+                tail = f.read()[-1600:].decode("utf-8", "ignore")
             abort.set()
-            raise RuntimeError(f"render chunk {pi}: ffmpeg fail\n" + tail)
+            reason = (f"frame count {j - j0}/{j1 - j0}\n"
+                      if j != j1 else "")
+            raise RuntimeError(f"render chunk {pi}: ffmpeg fail\n" + reason + tail)
         try:
             os.remove(log_path)
         except OSError:
@@ -1970,13 +1987,12 @@ def _synthesize(proj, my_list, s, progress, proxy):
     durs = [0.0] * n
     done = 0
     progress(0.0, f"အသံ ထုတ်နေတယ် 0/{n}")
-    # Nara uses one cached ONNX model per voice. Split available CPU capacity
-    # between workers and ONNX intra-op threads instead of serializing all lines.
     if backend == "nara":
-        cpu = os.cpu_count() or 4
-        requested = int(os.environ.get("NARA_WORKERS", max(2, cpu // 2)))
-        workers = max(1, min(requested, n))
-        os.environ.setdefault("NARA_THREADS", str(max(1, cpu // workers)))
+        try:
+            cpu = len(os.sched_getaffinity(0))
+        except Exception:
+            cpu = os.cpu_count() or 4
+        workers = max(1, min(int(os.environ.get("NARA_WORKERS", min(cpu, 4))), n))
     else:
         workers = max(1, s.tts_workers)
     with ThreadPoolExecutor(max_workers=workers) as pool:
