@@ -1331,7 +1331,7 @@ def tts_edge(text, voice, rate, mp3, proxy=None):
 
 def tts_nara(text, voice, output_wav):
     """Run YeeNyunn/nara-mini-v1 locally through its bundled ONNX synthesizer."""
-    model_dir = os.environ.get("NARA_MODEL_DIR", "nara-mini-v1")
+    model_dir = os.path.abspath(os.environ.get("NARA_MODEL_DIR", "nara-mini-v1"))
     script = os.path.join(model_dir, "synthesize.py")
     voice_id = voice.split(":", 1)[1] if voice.startswith("nara:") else voice
     if not os.path.isfile(script):
@@ -1342,18 +1342,18 @@ def tts_nara(text, voice, output_wav):
                 local_dir=model_dir,
                 allow_patterns=[
                     "synthesize.py", "requirements.txt", "config.json",
-                    "inference_config.json", "frontend/*", "onnx/*/*",
-                ],
-            )
-            script = os.path.join(model_dir, "synthesize.py")
+                "inference_config.json", "frontend/*", "onnx/*/*",
+            ],
+        )
         except Exception as ex:
             raise RuntimeError(
                 "Nara offline model မတွေ့ပါ။ Auto-download မအောင်မြင်ပါ: "
                 f"{str(ex)[-500:]}"
             ) from ex
     if not os.path.isfile(script):
-        raise RuntimeError("Nara model download ပြီးသော်လည်း synthesize.py မတွေ့ပါ")
-    cmd = [sys.executable, script, "--voice", voice_id, "--text", text,
+        raise RuntimeError(f"Nara model download ပြီးသော်လည်း synthesize.py မတွေ့ပါ: {script}")
+    output_wav = os.path.abspath(output_wav)
+    cmd = [sys.executable, "synthesize.py", "--voice", voice_id, "--text", text,
            "--output", output_wav, "--threads", os.environ.get("NARA_THREADS", "2")]
     try:
         subprocess.run(cmd, cwd=model_dir, check=True, capture_output=True, text=True)
