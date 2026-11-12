@@ -1342,6 +1342,11 @@ def _nara_synthesize_cached(model_dir, voice_id, text, threads=2):
     engine = _NARA_CACHE.get(key)
     if engine is None:
         script = os.path.join(model_dir, "synthesize.py")
+        # synthesize.py imports the bundled `frontend` package. The previous
+        # subprocess version got this automatically from cwd; the cached
+        # in-process version must add the model directory explicitly.
+        if model_dir not in sys.path:
+            sys.path.insert(0, model_dir)
         spec = importlib.util.spec_from_file_location("_nara_frontend", script)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
