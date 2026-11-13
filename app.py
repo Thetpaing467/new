@@ -1204,6 +1204,60 @@ def fetch_video(source, final, height=720, progress=None, cookies_file=None):
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
+def fetch_video_section(source, final, start_sec, duration_sec, height=720,
+                        progress=None, cookies_file=None):
+    """Download one time range from a URL, or cut that range from a local file."""
+    source = extract_url(source)
+    start_sec = max(0.0, float(start_sec))
+    duration_sec = max(1.0, float(duration_sec))
+    end_sec = start_sec + duration_sec
+    if not re.match(r"^https?://", source, re.I):
+        if not os.path.isfile(source):
+            raise FileNotFoundError(f"ဖိုင် မတွေ့ပါ: {source}")
+        sh(["ffmpeg", "-y", "-ss", f"{start_sec:.3f}", "-i", source,
+            "-t", f"{duration_sec:.3f}", "-c", "copy",
+            "-avoid_negative_ts", "make_zero", final])
+        return final
+
+    import yt_dlp
+    work = tempfile.mkdtemp(prefix="clip_")
+    raw_base = os.path.join(work, "clip")
+
+    def hook(d):
+        if progress and d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            if total:
+                progress(d.get("downloaded_bytes", 0) / total)
+
+    opts = {
+        "format": (f"bv*[height<= {int(height)}][vcodec^=avc1]+ba[ext=m4a]/"
+                   f"b[height<={int(height)}][vcodec^=avc1]/"
+                   f"bv*[height<={int(height)}]+ba/b[height<={int(height)}]/b").replace("height<= ", "height<="),
+        "outtmpl": raw_base + ".%(ext)s",
+        "merge_output_format": "mp4",
+        "download_ranges": yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
+        "force_keyframes_at_cuts": False,
+        "noplaylist": True, "quiet": True, "no_warnings": True,
+        "retries": 5, "fragment_retries": 5,
+        "concurrent_fragment_downloads": 4,
+        "progress_hooks": [hook],
+    }
+    if cookies_file and os.path.exists(cookies_file):
+        opts["cookiefile"] = cookies_file
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([source])
+        files = [p for p in glob.glob(raw_base + ".*")
+                 if not p.endswith((".part", ".ytdl"))]
+        if not files:
+            raise RuntimeError("ရွေးထားသော clip ဖိုင် မထွက်ပါ")
+        ensure_mp4(max(files, key=os.path.getsize), final, height)
+        if progress:
+            progress(1.0)
+        return final
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
 # ======================================================================
 # transcribe
 # ======================================================================
@@ -2393,16 +2447,34 @@ def launch_ui():
         fill = int(width * frac)
         return "█" * fill + "░" * (width - fill)
 
-    def _ensure_video(url, height, cb):
+    def _ensure_video(url, height, cb, clip_mode="Full video", clip_start=0):
         source = _source(url)
         if not source:
             raise gr.Error("Video link ထည့်ပါ")
-        key = source
+        mode_map = {"3-minute clip": 180.0, "5-minute clip": 300.0}
+        clip_duration = mode_map.get(clip_mode)
+        key = f"{source}|{clip_mode}|{float(clip_start):.1f}"
         if os.path.isfile(source):
             key += f"|{os.path.getsize(source)}"
         pdir = os.path.join(BASE, hashlib.md5(key.encode()).hexdigest()[:10])
-        dl_prog = Progress(0.0, 1.0, parent=lambda f, l=None: cb(f, "Video ယူနေတယ်..."))
-        proj = init_project(pdir, source, int(height), os.environ.get("YT_COOKIES"), dl_prog)
+        os.makedirs(pdir, exist_ok=True)
+        final = os.path.join(pdir, "src.mp4")
+        if clip_duration is None:
+            dl_prog = Progress(0.0, 1.0, parent=lambda f, l=None: cb(f, "Video ယူနေတယ်..."))
+            proj = init_project(pdir, source, int(height), os.environ.get("YT_COOKIES"), dl_prog)
+        else:
+            if not os.path.exists(final) or os.path.getsize(final) < 1000:
+                cb(0.0, f"{clip_mode} ဆွဲနေတယ်...")
+                fetch_video_section(source, final, float(clip_start) * 60.0, clip_duration,
+                                    int(height), lambda f: cb(f, f"{clip_mode} ဆွဲနေတယ်..."),
+                                    os.environ.get("YT_COOKIES"))
+                proj = Project.create(pdir)
+                proj.data["source"] = source
+                proj.data["clip_start"] = float(clip_start) * 60.0
+                proj.data["clip_duration"] = clip_duration
+                proj.save()
+            else:
+                proj = Project.load(pdir)
         return pdir, proj
 
     dark_head = """
@@ -2440,7 +2512,7 @@ def launch_ui():
 
     FETCH = {}
 
-    def start_fetch(url, height):
+    def start_fetch(url, height, clip_mode, clip_start):
         if not _source(url):
             raise gr.Error("Video link ထည့်ပါ")
         jid = uuid.uuid4().hex[:8]
@@ -2455,7 +2527,7 @@ def launch_ui():
 
         def work():
             try:
-                st["res"] = _ensure_video(url, height, cb)
+                st["res"] = _ensure_video(url, height, cb, clip_mode, clip_start)
             except BaseException as ex:
                 st["err"] = ex
             finally:
@@ -2521,7 +2593,7 @@ def launch_ui():
 
     TRANS = {}
 
-    def start_step1(url, lang_name, model, src_lang, max_min, height):
+    def start_step1(url, lang_name, model, src_lang, max_min, height, clip_mode, clip_start):
         if not _source(url):
             raise gr.Error("Video link ထည့်ပါ")
         code = LANGS[lang_name]
@@ -2538,7 +2610,8 @@ def launch_ui():
         def work():
             try:
                 cb(0.0, "Video ယူနေတယ်...")
-                pdir, proj = _ensure_video(url, height, lambda f, l=None: cb(f * 0.2, l))
+                pdir, proj = _ensure_video(url, height, lambda f, l=None: cb(f * 0.2, l),
+                                         clip_mode, clip_start)
                 tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
                 info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
                 st["res"] = (pdir, info, build_prompt_chunks(proj.units, code))
@@ -2741,6 +2814,11 @@ def launch_ui():
         gr.Markdown("### 📥 Video")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
                          placeholder="https://...")
+        with gr.Row():
+            clip_mode = gr.Dropdown(["Full video", "3-minute clip", "5-minute clip"],
+                                    value="Full video", label="Download mode")
+            clip_start = gr.Number(value=0, minimum=0, step=0.5,
+                                   label="Clip start minute (3/5-minute mode)")
         b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
         status_fetch = gr.Markdown()
 
@@ -2764,7 +2842,8 @@ def launch_ui():
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click):
-            trig(start_fetch, [url, height], [fetch_job, status_fetch, fetch_timer])
+            trig(start_fetch, [url, height, clip_mode, clip_start],
+             [fetch_job, status_fetch, fetch_timer])
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
@@ -2812,7 +2891,7 @@ def launch_ui():
         hashtag_btn.click(extract_hashtags_from_parts, [parts_state, translated, lang], hashtag_output)
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-        b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
+        b1.click(start_step1, [url, lang, model, src_lang, max_min, height, clip_mode, clip_start],
                  [trans_job, status1, trans_timer, b1, pdir_state, chunks_state,
                   parts_state, translated, video, dl, status2, hashtag_output])
         trans_timer.tick(poll_step1, trans_job,
