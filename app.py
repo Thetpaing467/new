@@ -1258,6 +1258,68 @@ def fetch_video_section(source, final, start_sec, duration_sec, height=720,
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
+def find_visual_candidates(video, clip_minutes=3.0, max_candidates=20):
+    """Find quiet, face-friendly fixed-length windows without an AI model.
+
+    This is a visual candidate scan, not guaranteed dialogue detection.
+    """
+    cap = cv2.VideoCapture(video)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = total / fps if total else 0.0
+    if duration <= 0:
+        cap.release()
+        return []
+    sample_step = 2.0
+    samples = []
+    prev = None
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    t = 0.0
+    while t < duration:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if ok:
+            small = cv2.resize(frame, (320, 180))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            motion = float(np.mean(cv2.absdiff(gray, prev))) if prev is not None else 0.0
+            faces = len(cascade.detectMultiScale(gray, 1.1, 4, minSize=(24, 24)))
+            samples.append((t, motion, faces))
+            prev = gray
+        t += sample_step
+    cap.release()
+    if not samples:
+        return []
+
+    length = max(60.0, float(clip_minutes) * 60.0)
+    starts = list(np.arange(0.0, max(0.0, duration - length + 0.1), sample_step * 3.0))
+    if not starts:
+        starts = [0.0]
+    motion_values = [x[1] for x in samples]
+    motion_scale = max(float(np.percentile(motion_values, 75)), 1.0)
+    scored = []
+    for start in starts:
+        end = min(duration, start + length)
+        inside = [x for x in samples if start <= x[0] < end]
+        if not inside:
+            continue
+        avg_motion = sum(x[1] for x in inside) / len(inside)
+        face_hits = sum(1 for x in inside if x[2] > 0)
+        # Stable shots with visible faces are better dialogue candidates.
+        score = (face_hits / len(inside)) * 2.0 + max(0.0, 1.0 - avg_motion / motion_scale)
+        scored.append((score, start, end, avg_motion, face_hits))
+    scored.sort(reverse=True)
+    chosen = []
+    for score, start, end, avg_motion, face_hits in scored:
+        if any(abs(start - old["start"]) < length * 0.55 for old in chosen):
+            continue
+        chosen.append({"start": start, "end": end, "score": score,
+                       "faces": face_hits, "motion": avg_motion})
+        if len(chosen) >= int(max_candidates):
+            break
+    chosen.sort(key=lambda x: x["start"])
+    return chosen
+
 # ======================================================================
 # transcribe
 # ======================================================================
@@ -2451,9 +2513,12 @@ def launch_ui():
         source = _source(url)
         if not source:
             raise gr.Error("Video link ထည့်ပါ")
-        mode_map = {"3-minute clip": 180.0, "5-minute clip": 300.0}
+        mode_map = {"3-minute clip": 180.0, "5-minute clip": 300.0,
+                    "Auto scene candidate (3m)": 180.0,
+                    "Auto scene candidate (5m)": 300.0}
         clip_duration = mode_map.get(clip_mode)
-        key = f"{source}|{clip_mode}|{float(clip_start):.1f}"
+        cache_start = 0.0 if clip_mode.startswith("Auto scene") else float(clip_start)
+        key = f"{source}|{clip_mode}|{cache_start:.1f}"
         if os.path.isfile(source):
             key += f"|{os.path.getsize(source)}"
         pdir = os.path.join(BASE, hashlib.md5(key.encode()).hexdigest()[:10])
@@ -2463,18 +2528,53 @@ def launch_ui():
             dl_prog = Progress(0.0, 1.0, parent=lambda f, l=None: cb(f, "Video ယူနေတယ်..."))
             proj = init_project(pdir, source, int(height), os.environ.get("YT_COOKIES"), dl_prog)
         else:
-            if not os.path.exists(final) or os.path.getsize(final) < 1000:
-                cb(0.0, f"{clip_mode} ဆွဲနေတယ်...")
-                fetch_video_section(source, final, float(clip_start) * 60.0, clip_duration,
-                                    int(height), lambda f: cb(f, f"{clip_mode} ဆွဲနေတယ်..."),
-                                    os.environ.get("YT_COOKIES"))
+            auto = clip_mode.startswith("Auto scene")
+            if auto:
+                full = os.path.join(pdir, "full_source.mp4")
+                if not os.path.exists(full) or os.path.getsize(full) < 1000:
+                    cb(0.0, "Full video scan အတွက် download လုပ်နေတယ်...")
+                    fetch_video(source, full, int(height),
+                                lambda f: cb(f * 0.45, "Full video download..."),
+                                os.environ.get("YT_COOKIES"))
+                clip_minutes = clip_duration / 60.0
+                cb(0.5, "Visual scene candidate scan လုပ်နေတယ်...")
+                candidates = find_visual_candidates(full, clip_minutes)
+                if not candidates:
+                    candidates = [{"start": 0.0, "end": clip_duration, "score": 0.0,
+                                   "faces": 0, "motion": 0.0}]
+                candidate_no = max(1, int(float(clip_start)))
+                candidate_no = min(candidate_no, len(candidates))
+                selected = candidates[candidate_no - 1]
+                actual_start = selected["start"]
+                cb(0.65, f"Candidate {candidate_no}/{len(candidates)} ကို ဖြတ်နေတယ်...")
+                previous = None
+                if os.path.exists(os.path.join(pdir, "project.json")):
+                    previous = Project.load(pdir).data.get("selected_candidate")
+                if (not os.path.exists(final) or os.path.getsize(final) < 1000
+                        or int(previous or 0) != candidate_no):
+                    sh(["ffmpeg", "-y", "-ss", f"{actual_start:.3f}", "-i", full,
+                        "-t", f"{clip_duration:.3f}", "-c", "copy",
+                        "-avoid_negative_ts", "make_zero", final])
                 proj = Project.create(pdir)
-                proj.data["source"] = source
-                proj.data["clip_start"] = float(clip_start) * 60.0
-                proj.data["clip_duration"] = clip_duration
+                proj.data.update({"source": source, "clip_start": actual_start,
+                                  "clip_duration": clip_duration,
+                                  "visual_candidates": candidates,
+                                  "selected_candidate": candidate_no})
                 proj.save()
+                cb(1.0, f"Candidate {candidate_no}/{len(candidates)} ရပြီးပါပြီ")
             else:
-                proj = Project.load(pdir)
+                if not os.path.exists(final) or os.path.getsize(final) < 1000:
+                    cb(0.0, f"{clip_mode} ဆွဲနေတယ်...")
+                    fetch_video_section(source, final, float(clip_start) * 60.0, clip_duration,
+                                        int(height), lambda f: cb(f, f"{clip_mode} ဆွဲနေတယ်..."),
+                                        os.environ.get("YT_COOKIES"))
+                    proj = Project.create(pdir)
+                    proj.data["source"] = source
+                    proj.data["clip_start"] = float(clip_start) * 60.0
+                    proj.data["clip_duration"] = clip_duration
+                    proj.save()
+                else:
+                    proj = Project.load(pdir)
         return pdir, proj
 
     dark_head = """
@@ -2815,10 +2915,11 @@ def launch_ui():
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
                          placeholder="https://...")
         with gr.Row():
-            clip_mode = gr.Dropdown(["Full video", "3-minute clip", "5-minute clip"],
+            clip_mode = gr.Dropdown(["Full video", "3-minute clip", "5-minute clip",
+                                    "Auto scene candidate (3m)", "Auto scene candidate (5m)"],
                                     value="Full video", label="Download mode")
             clip_start = gr.Number(value=0, minimum=0, step=0.5,
-                                   label="Clip start minute (3/5-minute mode)")
+                                   label="Start minute / Auto candidate #")
         b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
         status_fetch = gr.Markdown()
 
