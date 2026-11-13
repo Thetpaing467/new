@@ -558,7 +558,7 @@ def resolve_lang(value):
 @dataclass
 class Settings:
     lang: str = "my"
-    voice: str = ""
+    voice: str = "nara:thazin"
     rate: Optional[int] = None
     tts_workers: int = 8
     loud_lufs: float = -14.0
@@ -2211,6 +2211,8 @@ def settings_for(proj, args):
     s.punch_zoom = max(1.02, min(1.4, float(s.punch_zoom)))
     s.bgm_vol = max(0.0, min(1.0, float(s.bgm_vol)))
     s.split_min = max(0.0, float(s.split_min))
+    if not s.voice and s.lang == "my":
+        s.voice = "nara:thazin"
     if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -2672,7 +2674,8 @@ def launch_ui():
     def on_lang_change(l):
         code = LANGS[l]
         v = voices_for(code)
-        return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
+        preferred = "nara:thazin" if code == "my" and "nara:thazin" in v else v[0]
+        return gr.update(choices=v, value=preferred), gr.update(value=LANG_CONF[code]["rate"])
 
     def render_started():
         return "⏳ အသံထုတ် + Video ပေါင်းနေတယ်... ခဏစောင့်ပါ"
@@ -2719,7 +2722,7 @@ def launch_ui():
 
         with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
             lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
-            voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="TTS voice (Edge / Nara offline)")
+            voice = gr.Dropdown(voices_for("my"), value="nara:thazin", label="TTS voice (Edge / Nara offline)")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="အသံမြန်နှုန်း (Edge / Nara) %")
