@@ -558,7 +558,7 @@ def resolve_lang(value):
 @dataclass
 class Settings:
     lang: str = "my"
-    voice: str = "nara:thazin"
+    voice: str = ""
     rate: Optional[int] = None
     tts_workers: int = 8
     loud_lufs: float = -14.0
@@ -583,7 +583,8 @@ class Settings:
     sub_alpha: int = 140
     sub_sweep: bool = True
     font: str = ""
-    neon: bool = True
+    # Neon border disabled
+    neon: bool = False
     neon_th: int = 3
     neon_speed: float = 0.15
     punch: bool = True             # ၃ စက္ကန့်တိုင်း ရပ်ပြီး zoom in
@@ -1505,7 +1506,8 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     nfr = max(1, int(round(total * fps_out)))
     fs = max(16, int(W * s.sub_size / 100))
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
-    neon = _neon_for(W, H, s.neon_th, s.neon_speed) if s.neon else None
+    # Neon border intentionally disabled for output video.
+    neon = None
 
     punch_on = bool(getattr(s, "punch", False)) and float(s.punch_every) > 0
     p_every = float(s.punch_every)
@@ -1646,8 +1648,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                 if fr is None:
                     break
                 t = j / fps_out
-                if neon:
-                    neon.apply(fr, t)
+                # Neon border removed.
                 if subs and font_path:
                     if j == j0:
                         while k < len(subs) and subs[k][1] < t_start:
@@ -1828,8 +1829,7 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     H, W = base.shape[:2]
     mirror = s.mirror_phase(t)
     fr = zoom_flip(base.copy(), s.zoom, mirror)
-    if s.neon:
-        _neon_for(W, H, s.neon_th, s.neon_speed).apply(fr, t)
+    # Neon border removed from preview as well.
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
@@ -2211,8 +2211,6 @@ def settings_for(proj, args):
     s.punch_zoom = max(1.02, min(1.4, float(s.punch_zoom)))
     s.bgm_vol = max(0.0, min(1.0, float(s.bgm_vol)))
     s.split_min = max(0.0, float(s.split_min))
-    if not s.voice and s.lang == "my":
-        s.voice = "nara:thazin"
     if s.voice:
         valid = [v for v, _ in LANG_CONF[s.lang]["edge_voices"]]
         if s.voice not in valid:
@@ -2607,8 +2605,8 @@ def launch_ui():
             s.sub_sweep = bool(sweep)
             s.punch = bool(punch)
             s.punch_every, s.punch_hold, s.punch_zoom = 3.0, 0.5, 1.15
-            # Neon: always ON with defaults
-            s.neon = True
+            # Neon border disabled
+            s.neon = False
             s.neon_th = 3
             s.neon_speed = 0.15
 
@@ -2674,8 +2672,7 @@ def launch_ui():
     def on_lang_change(l):
         code = LANGS[l]
         v = voices_for(code)
-        preferred = "nara:thazin" if code == "my" and "nara:thazin" in v else v[0]
-        return gr.update(choices=v, value=preferred), gr.update(value=LANG_CONF[code]["rate"])
+        return gr.update(choices=v, value=v[0]), gr.update(value=LANG_CONF[code]["rate"])
 
     def render_started():
         return "⏳ အသံထုတ် + Video ပေါင်းနေတယ်... ခဏစောင့်ပါ"
@@ -2709,7 +2706,7 @@ def launch_ui():
 
     with gr.Blocks(**blocks_kw) as demo:
         gr.Markdown(f"# 🎙️ Recap → my / de / en / es / ja  `v{__version__}`\n"
-                    f"Whisper → Gemini → TTS (Edge / Nara offline, shared speed control) → Smart Sync → စာတန်း + Neon · Mirror=5s · Render=4 · Split=1.03min")
+                    f"Whisper → Gemini → TTS (Edge / Nara offline, shared speed control) → Smart Sync → စာတန်း · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
         fps = gr.State(24)
@@ -2722,7 +2719,7 @@ def launch_ui():
 
         with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
             lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
-            voice = gr.Dropdown(voices_for("my"), value="nara:thazin", label="TTS voice (Edge / Nara offline)")
+            voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="TTS voice (Edge / Nara offline)")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="အသံမြန်နှုန်း (Edge / Nara) %")
