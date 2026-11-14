@@ -100,6 +100,13 @@ def _tail(script, accent, story):
         "Output only numbered lines in the format [number] text."
     ).replace("{language}", "the requested language")
 
+# Compatibility placeholders: language-specific prose is now handled by _tail().
+# Keep these names because the language table passes them into _tail().
+_STORY_MY = ""
+_STORY_DE = ""
+_STORY_EN = ""
+_STORY_ES = ""
+
 LANG_CONF = {
     "my": {
         "name": "Burmese", "label": "မြန်မာ",
