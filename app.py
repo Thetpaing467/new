@@ -2273,19 +2273,19 @@ def launch_ui():
     def preview_auto(*a):
         return _preview(*a, False)
 
-    def preview_tap_to_seek(image_path, evt):
-        """Convert a tap position on the preview image into a 0..PREVIEW_SECS time."""
+    def preview_move_subtitle(image_path, evt):
+        """Set subtitle vertical position from the tapped point on the preview."""
         if not image_path:
             return gr.skip()
         try:
             xy = getattr(evt, "index", None)
-            if not isinstance(xy, (tuple, list)) or len(xy) < 1:
+            if not isinstance(xy, (tuple, list)) or len(xy) < 2:
                 return gr.skip()
-            x = float(xy[0])
+            y = float(xy[1])
             with Image.open(image_path) as im:
-                width = max(1, int(im.width))
-            t = max(0.0, min(PREVIEW_SECS, (x / width) * PREVIEW_SECS))
-            return gr.update(value=round(t, 1))
+                height = max(1, int(im.height))
+            pos = max(0, min(100, round((y / height) * 100)))
+            return gr.update(value=pos)
         except Exception:
             return gr.skip()
 
@@ -2537,7 +2537,7 @@ def launch_ui():
         status_fetch = gr.Markdown()
 
         gr.Markdown("### 🎨 Preview")
-        pv_img = gr.Image(label="Preview (ရလဒ်) · ပုံပေါ်မှာ လက်နဲ့ဖိပြီး အချိန်ရွေးပါ",
+        pv_img = gr.Image(label="Preview (ရလဒ်) · စာတန်းနေရာကို ပုံပေါ်မှာ လက်နဲ့ဖိရွေးပါ",
                           type="filepath", interactive=False)
         # Hidden state: tapping the preview image sets this time and refreshes the frame.
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1, visible=False)
@@ -2550,12 +2550,13 @@ def launch_ui():
                 flip = gr.Checkbox(True, label="Mirror")
                 punch = gr.Checkbox(True, label="🔍 ၃ စက္ကန့်တိုင်း ရပ်ပြီး Zoom")
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
-            sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
+            # Hidden state: subtitle position is controlled by tapping the preview image.
+            sub_pos = gr.Slider(0, 100, value=90, step=1, visible=False)
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
         pv_in = [pdir_state, lang, height, aspect, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
-        # Mobile-friendly tap-to-seek: the tap's horizontal position maps to 0..PREVIEW_SECS.
-        pv_img.select(preview_tap_to_seek, [pv_img], [pv_t], show_progress="hidden")
+        # Mobile-friendly subtitle positioning: tap vertically where the subtitle should sit.
+        pv_img.select(preview_move_subtitle, [pv_img], [sub_pos], show_progress="hidden")
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click):
