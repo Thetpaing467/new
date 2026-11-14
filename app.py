@@ -2201,46 +2201,8 @@ def launch_ui():
         "theme": gr.themes.Base(primary_hue="indigo", secondary_hue="purple", neutral_hue="slate"),
         "css": ":root, html, body, gradio-app { color-scheme: dark; }"
                " body, gradio-app, .gradio-container { background: #0b0f19 !important; }"
-               " footer {display:none !important;}"
-               " #preview-image, #preview-image img { -webkit-touch-callout:none !important; user-select:none !important; touch-action:none !important; }"
-               " #subtitle-pos-state { display:none !important; }",
-        "js": """() => {
-          document.documentElement.classList.add('dark');
-          document.body.classList.add('dark');
-          let dragging = false;
-          function previewImage(target) {
-            return target && target.closest && target.closest('#preview-image');
-          }
-          function setSubtitlePosition(ev) {
-            const img = document.querySelector('#preview-image img');
-            const slider = document.querySelector('#subtitle-pos-state input[type=range]');
-            if (!img || !slider) return;
-            const r = img.getBoundingClientRect();
-            if (!r.height) return;
-            const y = Math.max(0, Math.min(100, Math.round((ev.clientY - r.top) / r.height * 100)));
-            slider.value = String(y);
-            slider.dispatchEvent(new Event('input', {bubbles:true}));
-            slider.dispatchEvent(new Event('change', {bubbles:true}));
-          }
-          document.addEventListener('contextmenu', function(ev) {
-            if (previewImage(ev.target)) ev.preventDefault();
-          }, {passive:false});
-          document.addEventListener('pointerdown', function(ev) {
-            if (previewImage(ev.target)) {
-              dragging = true;
-              setSubtitlePosition(ev);
-              ev.preventDefault();
-            }
-          }, {passive:false});
-          document.addEventListener('pointermove', function(ev) {
-            if (dragging) {
-              setSubtitlePosition(ev);
-              ev.preventDefault();
-            }
-          }, {passive:false});
-          document.addEventListener('pointerup', function() { dragging = false; }, {passive:true});
-          document.addEventListener('pointercancel', function() { dragging = false; }, {passive:true});
-        }""",
+               " footer {display:none !important;}",
+        "js": "() => { document.documentElement.classList.add('dark'); document.body.classList.add('dark'); }",
         "head": dark_head,
     }
     try:
@@ -2311,19 +2273,19 @@ def launch_ui():
     def preview_auto(*a):
         return _preview(*a, False)
 
-    def preview_move_subtitle(image_path, evt):
-        """Set subtitle vertical position from the tapped point on the preview."""
+    def preview_tap_to_seek(image_path, evt):
+        """Convert a tap position on the preview image into a 0..PREVIEW_SECS time."""
         if not image_path:
             return gr.skip()
         try:
             xy = getattr(evt, "index", None)
-            if not isinstance(xy, (tuple, list)) or len(xy) < 2:
+            if not isinstance(xy, (tuple, list)) or len(xy) < 1:
                 return gr.skip()
-            y = float(xy[1])
+            x = float(xy[0])
             with Image.open(image_path) as im:
-                height = max(1, int(im.height))
-            pos = max(0, min(100, round((y / height) * 100)))
-            return gr.update(value=pos)
+                width = max(1, int(im.width))
+            t = max(0.0, min(PREVIEW_SECS, (x / width) * PREVIEW_SECS))
+            return gr.update(value=round(t, 1))
         except Exception:
             return gr.skip()
 
@@ -2575,8 +2537,7 @@ def launch_ui():
         status_fetch = gr.Markdown()
 
         gr.Markdown("### 🎨 Preview")
-        pv_img = gr.Image(label="Preview (ရလဒ်) · စာတန်းကို လက်နဲ့ဖိပြီး အပေါ်/အောက်ရွှေ့ပါ",
-                          type="filepath", interactive=False, elem_id="preview-image")
+        pv_img = gr.Image(label="Preview (ရလဒ်)", type="filepath", interactive=False)
         # Hidden state: tapping the preview image sets this time and refreshes the frame.
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1, visible=False)
 
@@ -2588,13 +2549,11 @@ def launch_ui():
                 flip = gr.Checkbox(True, label="Mirror")
                 punch = gr.Checkbox(True, label="🔍 ၃ စက္ကန့်တိုင်း ရပ်ပြီး Zoom")
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
-            # Hidden state: subtitle position is controlled by tapping the preview image.
-            sub_pos = gr.Slider(0, 100, value=90, step=1, elem_id="subtitle-pos-state")
+            sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
         pv_in = [pdir_state, lang, height, aspect, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
-        # Mobile-friendly subtitle positioning: tap vertically where the subtitle should sit.
-        pv_img.select(preview_move_subtitle, [pv_img], [sub_pos], show_progress="hidden")
+        # Subtitle position is controlled by the visible slider below.
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click):
