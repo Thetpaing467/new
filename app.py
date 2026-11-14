@@ -378,10 +378,10 @@ LANG_CONF = {
         "name": "Burmese", "label": "မြန်မာ",
         "sample": "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။",
         "rate": 45, "trim": TRIM,
-        "edge_voices": [("my-MM-ThihaNeural", "Thiha (male, online)"),
+        "edge_voices": [("nara:thazin", "Thazin (Burmese, offline)"),
+                        ("my-MM-ThihaNeural", "Thiha (male, online)"),
                         ("my-MM-NilarNeural", "Nilar (female, online)"),
                         ("nara:shoon", "Shoon (Burmese, offline)"),
-                        ("nara:thazin", "Thazin (Burmese, offline)"),
                         ("nara:ko-banyar", "Ko Banyar (Burmese, offline)"),
                         ("nara:htet-myat", "Htet Myat (Burmese, offline)")],
         "sentence_end": r"(?<=။)",
@@ -2719,7 +2719,7 @@ def launch_ui():
 
         with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
             lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
-            voice = gr.Dropdown(voices_for("my"), value=voices_for("my")[0], label="TTS voice (Edge / Nara offline)")
+            voice = gr.Dropdown(voices_for("my"), value="nara:thazin", label="TTS voice (Edge / Nara offline)")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="အသံမြန်နှုန်း (Edge / Nara) %")
