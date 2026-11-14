@@ -306,6 +306,7 @@ class Settings:
     bgm_vol: float = 0.25
     duck: bool = True
     height: int = 720
+    aspect: str = "9:16"
     fps: int = 24
     preset: str = "ultrafast"
     max_speed: float = 1.25
@@ -707,20 +708,44 @@ def _neon_for(W, H, th, speed):
         _NEON_CACHE[key] = Neon(W, H, th, speed)
     return _NEON_CACHE[key]
 
-def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR):
+def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR, blur_bg=False):
     x, y, w, h = rect
     f = fr[y:y + h, x:x + w]
-    if (w, h) != (W, H):
-        f = cv2.resize(f, (W, H), interpolation=interp)
-    else:
-        f = f.copy()
+    if f is None or f.size == 0:
+        raise RuntimeError("video frame crop မရပါ")
     if mirror:
         f = cv2.flip(f, 1)
-    return f
-def out_size(rect, height):
-    H = int(height) // 2 * 2
-    W = int(round(rect[2] * H / rect[3] / 2)) * 2
-    return W, H
+    sh, sw = f.shape[:2]
+    if blur_bg and abs((sw / max(1, sh)) - 1.0) < 0.08 and abs((W / max(1, H)) - 1.0) > 0.08:
+        # Keep the square video fully visible over a blurred, enlarged copy.
+        cover = max(W / max(1, sw), H / max(1, sh))
+        bw, bh = max(W, int(round(sw * cover))), max(H, int(round(sh * cover)))
+        bg = cv2.resize(f, (bw, bh), interpolation=cv2.INTER_LINEAR)
+        x0, y0 = max(0, (bw - W) // 2), max(0, (bh - H) // 2)
+        bg = bg[y0:y0 + H, x0:x0 + W]
+        bg = cv2.GaussianBlur(bg, (0, 0), max(5.0, min(W, H) * 0.025))
+        bg = np.clip(bg.astype(np.float32) * 0.72, 0, 255).astype(np.uint8)
+        fit = min(W / max(1, sw), H / max(1, sh))
+        fw, fh = max(2, int(round(sw * fit))), max(2, int(round(sh * fit)))
+        fg = cv2.resize(f, (fw, fh), interpolation=interp)
+        ox, oy = (W - fw) // 2, (H - fh) // 2
+        bg[oy:oy + fh, ox:ox + fw] = fg
+        return bg
+    # Default behavior: fill the requested canvas and crop the excess.
+    scale = max(W / max(1, sw), H / max(1, sh))
+    rw, rh = max(W, int(round(sw * scale))), max(H, int(round(sh * scale)))
+    r = cv2.resize(f, (rw, rh), interpolation=interp)
+    x0, y0 = max(0, (rw - W) // 2), max(0, (rh - H) // 2)
+    return r[y0:y0 + H, x0:x0 + W].copy()
+
+def out_size(rect, height, aspect="free"):
+    H = max(2, int(height) // 2 * 2)
+    ratio = ASPECTS.get(aspect) if aspect in ASPECTS else None
+    if ratio:
+        W = int(round(H * ratio / 2)) * 2
+    else:
+        W = int(round(rect[2] * H / max(1, rect[3]) / 2)) * 2
+    return max(2, W), H
 
 # ======================================================================
 # crop helpers
@@ -1231,12 +1256,15 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
 
     auto = detect_crop(src) if s.crop else None
     base_rect = resolve_crop(src_w, src_h, s, auto)
-    W, H = out_size(base_rect, s.height)
+    W, H = out_size(base_rect, s.height, getattr(s, "aspect", "9:16"))
     # rawvideo/yuv420p encoders require positive even dimensions. Keep the
     # invariant here even if a crop detector returns unusual dimensions.
     W = max(2, int(W) // 2 * 2)
     H = max(2, int(H) // 2 * 2)
     rect = zoom_rect(base_rect, s.zoom)
+    target_aspect = ASPECTS.get(getattr(s, "aspect", "9:16"))
+    source_is_square = abs((src_w / max(1, src_h)) - 1.0) < 0.03
+    blur_bg = bool(source_is_square and target_aspect and abs(target_aspect - 1.0) > 0.08)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
@@ -1343,7 +1371,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                     if new:
                         ok, f = cap_.retrieve()
                         if ok:
-                            last = apply_view(f, rect, W, H, chunk_mirror, interp)
+                            last = apply_view(f, rect, W, H, chunk_mirror, interp, blur_bg=blur_bg)
                     if last is None:
                         raise RuntimeError(
                             f"source frame မဖတ်နိုင်ပါ (frame {idx}, chunk {pi})")
@@ -1565,9 +1593,15 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     cache_dir = os.path.dirname(os.path.abspath(out_png))
     t = max(0.0, min(float(t), PREVIEW_SECS))
     base = _preview_frame_at(src, cache_dir, s.height, s.crop, t)
-    H, W = base.shape[:2]
+    src_h, src_w = base.shape[:2]
     mirror = s.mirror_phase(t)
-    fr = zoom_flip(base.copy(), s.zoom, mirror)
+    W, H = out_size((0, 0, src_w, src_h), s.height, getattr(s, "aspect", "9:16"))
+    target_aspect = ASPECTS.get(getattr(s, "aspect", "9:16"))
+    blur_bg = bool(abs((src_w / max(1, src_h)) - 1.0) < 0.03 and
+                   target_aspect and abs(target_aspect - 1.0) > 0.08)
+    fr = apply_view(base, (0, 0, src_w, src_h), W, H, mirror,
+                    blur_bg=blur_bg)
+    fr = zoom_flip(fr, s.zoom, False)
     # Neon border removed from preview as well.
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
@@ -1894,6 +1928,7 @@ def add_style_args(p):
     g.add_argument("--no-duck", dest="duck", action="store_false", default=SUP)
     g = p.add_argument_group("video")
     g.add_argument("--height", type=int, choices=[360, 480, 720, 1080], default=SUP)
+    g.add_argument("--aspect", choices=["9:16", "16:9", "1:1", "free"], default=SUP)
     g.add_argument("--fps", type=int, choices=[20, 24, 25, 30], default=SUP)
     g.add_argument("--preset", choices=["ultrafast", "superfast", "veryfast"], default=SUP)
     g.add_argument("--max-speed", type=float, default=SUP)
@@ -2203,7 +2238,7 @@ def launch_ui():
         threading.Thread(target=work, daemon=True).start()
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
-    def _preview(pdir, lang_name, height, zoom, crop, flip, sub, sub_size,
+    def _preview(pdir, lang_name, height, aspect, zoom, crop, flip, sub, sub_size,
                  sub_pos, sweep, pv_t, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
@@ -2213,7 +2248,7 @@ def launch_ui():
         try:
             proj = Project.load(pdir)
             s = proj.settings
-            s.lang, s.height, s.zoom = code, int(height), float(zoom)
+            s.lang, s.height, s.aspect, s.zoom = code, int(height), str(aspect or "9:16"), float(zoom)
             s.crop, s.flip = bool(crop), bool(flip)
             s.mirror_every = 5.0   # hidden default
             s.sub = bool(sub)
@@ -2237,6 +2272,22 @@ def launch_ui():
 
     def preview_auto(*a):
         return _preview(*a, False)
+
+    def preview_tap_to_seek(image_path, evt):
+        """Convert a tap position on the preview image into a 0..PREVIEW_SECS time."""
+        if not image_path:
+            return gr.skip()
+        try:
+            xy = getattr(evt, "index", None)
+            if not isinstance(xy, (tuple, list)) or len(xy) < 1:
+                return gr.skip()
+            x = float(xy[0])
+            with Image.open(image_path) as im:
+                width = max(1, int(im.width))
+            t = max(0.0, min(PREVIEW_SECS, (x / width) * PREVIEW_SECS))
+            return gr.update(value=round(t, 1))
+        except Exception:
+            return gr.skip()
 
     def poll_fetch(jid, *pv):
         st = FETCH.get(jid) if jid else None
@@ -2312,7 +2363,7 @@ def launch_ui():
 
     def step2(pdir, translated, parts, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
-              height, fps, preset, max_speed, crop, flip, zoom,
+              height, aspect, fps, preset, max_speed, crop, flip, zoom,
               sub, sub_size, sub_pos, sweep, punch,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
@@ -2332,7 +2383,7 @@ def launch_ui():
             s.rate, s.tts_workers = int(rate), int(workers)
             s.bgm, s.bgm_vol = _path(bgm_file), max(0.0, min(1.0, float(bgm_vol)))
             s.voice_db, s.duck = float(voice_db), bool(duck)
-            s.height, s.fps, s.preset = int(height), int(fps), preset
+            s.height, s.aspect, s.fps, s.preset = int(height), str(aspect or "9:16"), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
@@ -2448,6 +2499,8 @@ def launch_ui():
                     f"Whisper → Gemini → TTS (Edge / Nara offline, shared speed control) → Smart Sync → စာတန်း · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
+        aspect = gr.Radio([("9:16 (Vertical)", "9:16"), ("16:9 (Horizontal)", "16:9")],
+                          value="9:16", label="Output ratio")
         fps = gr.State(24)
         preset = gr.State("ultrafast")
         crop = gr.State(True)
@@ -2484,9 +2537,10 @@ def launch_ui():
         status_fetch = gr.Markdown()
 
         gr.Markdown("### 🎨 Preview")
-        pv_img = gr.Image(label="Preview (ရလဒ်)", type="filepath", interactive=False)
-        pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
-                         label=f"⏱️ Preview အချိန် (0 – {PREVIEW_SECS:.0f} စက္ကန့်)")
+        pv_img = gr.Image(label="Preview (ရလဒ်) · ပုံပေါ်မှာ လက်နဲ့ဖိပြီး အချိန်ရွေးပါ",
+                          type="filepath", interactive=False)
+        # Hidden state: tapping the preview image sets this time and refreshes the frame.
+        pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1, visible=False)
 
         # Only subtitles in UI (mirror / render workers hidden)
         with gr.Accordion("🎛️ စာတန်း", open=False):
@@ -2499,7 +2553,9 @@ def launch_ui():
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
-        pv_in = [pdir_state, lang, height, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
+        pv_in = [pdir_state, lang, height, aspect, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
+        # Mobile-friendly tap-to-seek: the tap's horizontal position maps to 0..PREVIEW_SECS.
+        pv_img.select(preview_tap_to_seek, [pv_img], [pv_t], show_progress="hidden")
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         for trig in (url.submit, b_fetch.click):
@@ -2507,7 +2563,7 @@ def launch_ui():
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, pv_t):
+        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, aspect, pv_t):
             c.change(preview_auto, pv_in, pv_img,
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
@@ -2559,7 +2615,7 @@ def launch_ui():
                          show_progress="hidden")
         render_inputs = [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
-                         height, fps, preset, max_speed, crop, flip, zoom,
+                         height, aspect, fps, preset, max_speed, crop, flip, zoom,
                          sub, sub_size, sub_pos, sweep, punch]
         b2.click(render_started, None, status2, queue=False).then(
             step2, render_inputs, [video, dl, status2])
