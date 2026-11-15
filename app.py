@@ -919,6 +919,7 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
     return max(files, key=os.path.getsize)
 
 def ensure_mp4(raw, final, height):
+    """Normalize video and repair malformed AAC instead of stream-copying it."""
     try:
         codec = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
                     "-show_entries", "stream=codec_name", "-of", "csv=p=0", raw]).strip()
@@ -926,15 +927,18 @@ def ensure_mp4(raw, final, height):
         codec = ""
     if not codec:
         raise RuntimeError("Video stream မတွေ့ပါ")
-    if codec == "h264":
-        try:
-            sh(["ffmpeg", "-y", "-i", raw, "-c", "copy", "-movflags", "+faststart", final])
-            return final
-        except Exception:
-            pass
-    sh(["ffmpeg", "-y", "-i", raw, "-vf", f"scale=-2:'min(ih,{int(height)})'",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", final])
+    # Do not use -c copy here: malformed AAC packets (PCE/band errors) would
+    # survive into the project and fail again during Whisper extraction.
+    cmd = ["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
+           "-i", raw, "-map", "0:v:0", "-map", "0:a:0?",
+           "-vf", f"scale=-2:'min(ih,{int(height)})'",
+           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
+           "-movflags", "+faststart", final]
+    try:
+        sh(cmd)
+    except Exception as ex:
+        raise RuntimeError("Video/AAC ကို ပြန်ပြင်မရပါ။ မူရင်း file အသံ stream ပျက်နေပါတယ်: " + str(ex)[-500:])
     return final
 
 def fetch_video(source, final, height=720, progress=None, cookies_file=None):
