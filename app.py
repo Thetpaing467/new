@@ -604,12 +604,17 @@ class Settings:
     bgm: str = ""
     bgm_vol: float = 0.25
     duck: bool = True
-    height: int = 720
+    height: int = 0                 # 0 = preserve source quality (up to 1080p)
     aspect: str = "9:16"
-    fps: int = 24
+    fps: int = 30
     preset: str = "ultrafast"
     max_speed: float = 1.25
     crop: bool = True
+    crop_l: float = 0.0
+    crop_r: float = 0.0
+    crop_t: float = 0.0
+    crop_b: float = 0.0
+    crf: int = 20
     flip: bool = True
     mirror_every: float = 5.0      # default 5s (hidden from UI)
     zoom: float = 1.0
@@ -1038,13 +1043,29 @@ def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR, blur_bg=False):
     return r[y0:y0 + H, x0:x0 + W].copy()
 
 def out_size(rect, height, aspect="free"):
-    H = max(2, int(height) // 2 * 2)
     ratio = ASPECTS.get(aspect) if aspect in ASPECTS else None
+    if int(height) <= 0:
+        if ratio:
+            W = max(2, min(int(rect[2]), 1080) // 2 * 2)
+            H = max(2, int(round(W / ratio / 2)) * 2)
+        else:
+            W, H = max(2, int(rect[2]) // 2 * 2), max(2, int(rect[3]) // 2 * 2)
+        return W, H
+    H = max(2, int(height) // 2 * 2)
     if ratio:
         W = int(round(H * ratio / 2)) * 2
     else:
         W = int(round(rect[2] * H / max(1, rect[3]) / 2)) * 2
     return max(2, W), H
+
+def user_crop(rect, s):
+    x, y, w, h = rect
+    l, r, t, b = [max(0.0, min(float(v), 40.0))
+                  for v in (s.crop_l, s.crop_r, s.crop_t, s.crop_b)]
+    nx, ny = x + int(w * l / 100), y + int(h * t / 100)
+    nw = max(2, int(w * (1 - (l + r) / 100)) // 2 * 2)
+    nh = max(2, int(h * (1 - (t + b) / 100)) // 2 * 2)
+    return (nx, ny, nw, nh)
 
 # ======================================================================
 # crop helpers
@@ -1190,6 +1211,7 @@ def _dl_rednote(url, out, progress=None):
 
 def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
     import yt_dlp
+    height = int(height) or 1080
 
     def hook(d):
         if progress and d.get("status") == "downloading":
@@ -1218,29 +1240,34 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
     return max(files, key=os.path.getsize)
 
 def ensure_mp4(raw, final, height):
-    """Normalize video and repair malformed AAC instead of stream-copying it."""
+    """Repair malformed audio while avoiding unnecessary video re-encoding."""
     try:
         codec = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
                     "-show_entries", "stream=codec_name", "-of", "csv=p=0", raw]).strip()
+        vh = int(sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                     "-show_entries", "stream=height", "-of", "csv=p=0", raw]).strip())
     except Exception:
-        codec = ""
+        codec, vh = "", 0
     if not codec:
         raise RuntimeError("Video stream မတွေ့ပါ")
-    # Do not use -c copy here: malformed AAC packets (PCE/band errors) would
-    # survive into the project and fail again during Whisper extraction.
+    target = int(height) or 1080
+    if codec == "h264" and (int(height) <= 0 or (vh and vh <= target)):
+        vopts = ["-c:v", "copy"]
+    else:
+        vopts = ["-vf", f"scale=-2:'min(ih,{target})'",
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                 "-pix_fmt", "yuv420p"]
     cmd = ["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
-           "-i", raw, "-map", "0:v:0", "-map", "0:a:0?",
-           "-vf", f"scale=-2:'min(ih,{int(height)})'",
-           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p",
-           "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
+           "-i", raw, "-map", "0:v:0", "-map", "0:a:0?", *vopts,
+           "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
            "-movflags", "+faststart", final]
     try:
         sh(cmd)
     except Exception as ex:
-        raise RuntimeError("Video/AAC ကို ပြန်ပြင်မရပါ။ မူရင်း file အသံ stream ပျက်နေပါတယ်: " + str(ex)[-500:])
+        raise RuntimeError("Video/AAC ကို ပြန်ပြင်မရပါ။ " + str(ex)[-500:])
     return final
 
-def fetch_video(source, final, height=720, progress=None, cookies_file=None):
+def fetch_video(source, final, height=0, progress=None, cookies_file=None):
     source = extract_url(source)
     if not re.match(r"^https?://", source, re.I):
         if not os.path.isfile(source):
@@ -1561,12 +1588,13 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     # Ratio is intentionally fixed: always render a 9:16 vertical canvas.
     target_aspect = ASPECTS["9:16"]
     base_rect = resolve_crop(src_w, src_h, s, auto)
-    W, H = out_size(base_rect, s.height, "9:16")
+    render_rect = user_crop(base_rect, s)
+    W, H = out_size(render_rect, s.height, "9:16")
     # rawvideo/yuv420p encoders require positive even dimensions. Keep the
     # invariant here even if a crop detector returns unusual dimensions.
     W = max(2, int(W) // 2 * 2)
     H = max(2, int(H) // 2 * 2)
-    rect = zoom_rect(base_rect, s.zoom)
+    rect = zoom_rect(render_rect, s.zoom)
     # Fit any source ratio inside 9:16 and fill the unused area with blur.
     blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.08)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
@@ -1698,7 +1726,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         cmd = ["ffmpeg", "-y", "-loglevel", "error",
                "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{W}x{H}", "-r", str(fps_out), "-i", "-", "-an",
-               "-c:v", "libx264", "-preset", s.preset, "-crf", "27",
+               "-c:v", "libx264", "-preset", s.preset, "-crf", str(int(s.crf)),
                "-tune", "zerolatency",
                "-x264-params", "ref=1:bframes=0:scenecut=0:rc-lookahead=10",
                "-pix_fmt", "yuv420p", "-threads", str(per_threads), parts[pi]]
@@ -1896,14 +1924,14 @@ def _preview_frame_at(src, cache_dir, height, crop, t):
 def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     cache_dir = os.path.dirname(os.path.abspath(out_png))
     t = max(0.0, min(float(t), PREVIEW_SECS))
-    base = _preview_frame_at(src, cache_dir, s.height, s.crop, t)
+    base = _preview_frame_at(src, cache_dir, s.height or 720, s.crop, t)
     src_h, src_w = base.shape[:2]
     mirror = s.mirror_phase(t)
+    rect = user_crop((0, 0, src_w, src_h), s)
     target_aspect = ASPECTS["9:16"]
-    W, H = out_size((0, 0, src_w, src_h), s.height, "9:16")
-    blur_bg = bool(abs((src_w / max(1, src_h)) / target_aspect - 1.0) > 0.08)
-    fr = apply_view(base, (0, 0, src_w, src_h), W, H, mirror,
-                    blur_bg=blur_bg)
+    W, H = out_size(rect, s.height, "9:16")
+    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.08)
+    fr = apply_view(base, rect, W, H, mirror, blur_bg=blur_bg)
     fr = zoom_flip(fr, s.zoom, False)
     # Neon border removed from preview as well.
     if font_path and s.sub:
@@ -1979,7 +2007,7 @@ class Project:
 # ======================================================================
 # pipeline
 # ======================================================================
-def init_project(path, source, height=720, cookies_file=None, progress=None):
+def init_project(path, source, height=0, cookies_file=None, progress=None):
     proj = Project.create(path)
     if os.path.exists(proj.video) and proj.data.get("source") == source:
         log("• video ရှိပြီးသား၊ ပြန်မဆွဲတော့ဘူး")
@@ -2230,7 +2258,7 @@ def add_style_args(p):
     g.add_argument("--bgm-vol", type=float, default=SUP)
     g.add_argument("--no-duck", dest="duck", action="store_false", default=SUP)
     g = p.add_argument_group("video")
-    g.add_argument("--height", type=int, choices=[360, 480, 720, 1080], default=SUP)
+    g.add_argument("--height", type=int, choices=[0, 360, 480, 720, 1080], default=SUP)
     g.add_argument("--aspect", choices=["9:16", "16:9", "1:1", "free"], default=SUP)
     g.add_argument("--fps", type=int, choices=[20, 24, 25, 30], default=SUP)
     g.add_argument("--preset", choices=["ultrafast", "superfast", "veryfast"], default=SUP)
@@ -2415,7 +2443,7 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("init"); a.add_argument("source")
     a.add_argument("-d", "--dir", required=True)
-    a.add_argument("--height", type=int, default=720); a.add_argument("--cookies")
+    a.add_argument("--height", type=int, default=0); a.add_argument("--cookies")
     a.set_defaults(fn=cmd_init)
     a = sub.add_parser("transcribe"); a.add_argument("dir")
     a.add_argument("--lang", type=resolve_lang, default=None); add_whisper_args(a)
@@ -2474,12 +2502,13 @@ def launch_ui():
         source = _source(url)
         if not source:
             raise gr.Error("Video link ထည့်ပါ")
-        key = source
+        dl_h = int(height) or 1080
+        key = source + f"|{dl_h}"
         if os.path.isfile(source):
             key += f"|{os.path.getsize(source)}"
         pdir = os.path.join(BASE, hashlib.md5(key.encode()).hexdigest()[:10])
         dl_prog = Progress(0.0, 1.0, parent=lambda f, l=None: cb(f, "Video ယူနေတယ်..."))
-        proj = init_project(pdir, source, int(height), os.environ.get("YT_COOKIES"), dl_prog)
+        proj = init_project(pdir, source, dl_h, os.environ.get("YT_COOKIES"), dl_prog)
         return pdir, proj
 
     dark_head = """
@@ -2542,7 +2571,7 @@ def launch_ui():
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
     def _preview(pdir, lang_name, height, aspect, zoom, crop, flip, sub, sub_size,
-                 sub_pos, sweep, pv_t, strict):
+                 sub_pos, sweep, cl, cr, ct, cb, pv_t, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
@@ -2556,6 +2585,7 @@ def launch_ui():
             s.mirror_every = 5.0   # hidden default
             s.sub = bool(sub)
             s.sub_size, s.sub_pos, s.sub_sweep = float(sub_size), int(sub_pos), bool(sweep)
+            s.crop_l, s.crop_r, s.crop_t, s.crop_b = float(cl), float(cr), float(ct), float(cb)
             s.render_workers = 4   # hidden default
             font = find_font(code, s.font) if s.sub else None
             for old in glob.glob(os.path.join(pdir, "preview_*.png")):
@@ -2668,6 +2698,7 @@ def launch_ui():
               bgm_file, bgm_vol, voice_db, duck,
               height, aspect, fps, preset, max_speed, crop, flip, zoom,
               sub, sub_size, sub_pos, sweep, punch,
+              crop_l, crop_r, crop_t, crop_b,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
@@ -2688,6 +2719,9 @@ def launch_ui():
             s.voice_db, s.duck = float(voice_db), bool(duck)
             s.height, s.aspect, s.fps, s.preset = int(height), str(aspect or "9:16"), int(fps), preset
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
+            s.crop_l, s.crop_r, s.crop_t, s.crop_b = (float(crop_l), float(crop_r),
+                                                       float(crop_t), float(crop_b))
+            s.crf = 20
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
             s.render_workers = 4        # 4 parallel
@@ -2801,9 +2835,9 @@ def launch_ui():
         gr.Markdown(f"# 🎙️ Recap → my / de / en / es / ja  `v{__version__}`\n"
                     f"Whisper → Gemini → TTS (Edge / Nara offline, shared speed control) → Smart Sync → စာတန်း · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
-        height = gr.State(720)
+        height = gr.State(0)
         aspect = gr.State("9:16")
-        fps = gr.State(24)
+        fps = gr.State(30)
         preset = gr.State("ultrafast")
         crop = gr.State(True)
         model = gr.State("base")
@@ -2843,6 +2877,12 @@ def launch_ui():
         # Hidden state: tapping the preview image sets this time and refreshes the frame.
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1, visible=False)
 
+        with gr.Accordion("✂️ Video Crop (အလယ် video)", open=False):
+            crop_l = gr.Slider(0, 40, value=0, step=0.5, label="ဘယ်ဘက် ဖြတ် %")
+            crop_r = gr.Slider(0, 40, value=0, step=0.5, label="ညာဘက် ဖြတ် %")
+            crop_t = gr.Slider(0, 40, value=0, step=0.5, label="အပေါ် ဖြတ် %")
+            crop_b = gr.Slider(0, 40, value=0, step=0.5, label="အောက် ဖြတ် %")
+
         # Only subtitles in UI (mirror / render workers hidden)
         with gr.Accordion("🎛️ စာတန်း", open=False):
             with gr.Row():
@@ -2854,7 +2894,8 @@ def launch_ui():
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
-        pv_in = [pdir_state, lang, height, aspect, zoom, crop, flip, sub, sub_size, sub_pos, sweep, pv_t]
+        pv_in = [pdir_state, lang, height, aspect, zoom, crop, flip, sub, sub_size, sub_pos,
+                 sweep, crop_l, crop_r, crop_t, crop_b, pv_t]
         # Subtitle position is controlled by the visible slider below.
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
@@ -2863,7 +2904,8 @@ def launch_ui():
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, pv_t):
+        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang,
+                  crop_l, crop_r, crop_t, crop_b, pv_t):
             c.change(preview_auto, pv_in, pv_img,
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
@@ -2916,7 +2958,8 @@ def launch_ui():
         render_inputs = [pdir_state, translated, parts_state, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
                          height, aspect, fps, preset, max_speed, crop, flip, zoom,
-                         sub, sub_size, sub_pos, sweep, punch]
+                         sub, sub_size, sub_pos, sweep, punch,
+                         crop_l, crop_r, crop_t, crop_b]
         b2.click(render_started, None, status2, queue=False).then(
             step2, render_inputs, [video, dl, status2])
         b3.click(reset_all, pdir_state,
@@ -2931,7 +2974,7 @@ def launch_ui():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == "run" and not hasattr(args, "height"):
-        args.height = 720
+        args.height = 0
     try:
         args.fn(args)
     except KeyboardInterrupt:
