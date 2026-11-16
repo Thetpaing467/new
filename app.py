@@ -606,7 +606,7 @@ class Settings:
     duck: bool = True
     height: int = 0                 # 0 = preserve source quality (up to 1080p)
     aspect: str = "9:16"
-    fps: int = 30
+    fps: int = 24
     preset: str = "ultrafast"
     max_speed: float = 1.25
     crop: bool = True
@@ -614,7 +614,7 @@ class Settings:
     crop_r: float = 0.0
     crop_t: float = 0.0
     crop_b: float = 0.0
-    crf: int = 20
+    crf: int = 22
     flip: bool = True
     mirror_every: float = 5.0      # default 5s (hidden from UI)
     zoom: float = 1.0
@@ -2721,7 +2721,7 @@ def launch_ui():
             s.max_speed, s.crop, s.flip, s.zoom = float(max_speed), bool(crop), bool(flip), float(zoom)
             s.crop_l, s.crop_r, s.crop_t, s.crop_b = (float(crop_l), float(crop_r),
                                                        float(crop_t), float(crop_b))
-            s.crf = 20
+            s.crf = 22
             # HIDDEN defaults
             s.mirror_every = 5.0        # 5s mirror
             s.render_workers = 4        # 4 parallel
@@ -2837,7 +2837,7 @@ def launch_ui():
         pdir_state = gr.State("")
         height = gr.State(0)
         aspect = gr.State("9:16")
-        fps = gr.State(30)
+        fps = gr.State(24)
         preset = gr.State("ultrafast")
         crop = gr.State(True)
         model = gr.State("base")
