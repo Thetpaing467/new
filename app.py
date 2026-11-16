@@ -1015,8 +1015,8 @@ def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR, blur_bg=False):
     if mirror:
         f = cv2.flip(f, 1)
     sh, sw = f.shape[:2]
-    if blur_bg and abs((sw / max(1, sh)) - 1.0) < 0.08 and abs((W / max(1, H)) - 1.0) > 0.08:
-        # Keep the square video fully visible over a blurred, enlarged copy.
+    if blur_bg:
+        # Keep the complete source frame visible over a blurred, enlarged copy.
         cover = max(W / max(1, sw), H / max(1, sh))
         bw, bh = max(W, int(round(sw * cover))), max(H, int(round(sh * cover)))
         bg = cv2.resize(f, (bw, bh), interpolation=cv2.INTER_LINEAR)
@@ -1558,23 +1558,17 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     cap.release()
 
     auto = detect_crop(src) if s.crop else None
-    target_aspect = ASPECTS.get(getattr(s, "aspect", "9:16"))
-    source_is_square = abs((src_w / max(1, src_h)) - 1.0) < 0.05
-    # Square input: never crop it for vertical output. Keep the complete 1:1
-    # frame in the center and use an enlarged blurred copy to fill the canvas.
-    square_blur_layout = bool(source_is_square and target_aspect and
-                              abs(target_aspect - 1.0) > 0.08)
-    if square_blur_layout:
-        base_rect = (0, 0, src_w, src_h)
-    else:
-        base_rect = resolve_crop(src_w, src_h, s, auto)
-    W, H = out_size(base_rect, s.height, getattr(s, "aspect", "9:16"))
+    # Ratio is intentionally fixed: always render a 9:16 vertical canvas.
+    target_aspect = ASPECTS["9:16"]
+    base_rect = resolve_crop(src_w, src_h, s, auto)
+    W, H = out_size(base_rect, s.height, "9:16")
     # rawvideo/yuv420p encoders require positive even dimensions. Keep the
     # invariant here even if a crop detector returns unusual dimensions.
     W = max(2, int(W) // 2 * 2)
     H = max(2, int(H) // 2 * 2)
     rect = zoom_rect(base_rect, s.zoom)
-    blur_bg = square_blur_layout
+    # Fit any source ratio inside 9:16 and fill the unused area with blur.
+    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.08)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
@@ -1905,11 +1899,9 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     base = _preview_frame_at(src, cache_dir, s.height, s.crop, t)
     src_h, src_w = base.shape[:2]
     mirror = s.mirror_phase(t)
-    target_aspect = ASPECTS.get(getattr(s, "aspect", "9:16"))
-    square_blur_layout = bool(abs((src_w / max(1, src_h)) - 1.0) < 0.05 and
-                              target_aspect and abs(target_aspect - 1.0) > 0.08)
-    W, H = out_size((0, 0, src_w, src_h), s.height, getattr(s, "aspect", "9:16"))
-    blur_bg = square_blur_layout
+    target_aspect = ASPECTS["9:16"]
+    W, H = out_size((0, 0, src_w, src_h), s.height, "9:16")
+    blur_bg = bool(abs((src_w / max(1, src_h)) / target_aspect - 1.0) > 0.08)
     fr = apply_view(base, (0, 0, src_w, src_h), W, H, mirror,
                     blur_bg=blur_bg)
     fr = zoom_flip(fr, s.zoom, False)
@@ -2810,8 +2802,7 @@ def launch_ui():
                     f"Whisper → Gemini → TTS (Edge / Nara offline, shared speed control) → Smart Sync → စာတန်း · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
-        aspect = gr.Radio([("9:16 (Vertical)", "9:16"), ("16:9 (Horizontal)", "16:9")],
-                          value="9:16", label="Output ratio")
+        aspect = gr.State("9:16")
         fps = gr.State(24)
         preset = gr.State("ultrafast")
         crop = gr.State(True)
@@ -2872,7 +2863,7 @@ def launch_ui():
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, aspect, pv_t):
+        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang, pv_t):
             c.change(preview_auto, pv_in, pv_img,
                      trigger_mode="always_last", show_progress="hidden", queue=True)
 
