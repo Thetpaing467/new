@@ -116,6 +116,21 @@ _RECAP_NOTE = (
     + _NO_MISSING_LINES
 )
 
+_CINEMATIC_RECAP_STYLE = (
+    "CINEMATIC SOCIAL-MEDIA RECAP STYLE: do not translate the source dialogue line by line. "
+    "Rebuild the complete story as clear third-person narration so a viewer who has not seen the "
+    "original understands what happens, why it happens, and what happens next. Start with the "
+    "strongest supported hook when the story has a dangerous secret, shocking event, unusual "
+    "character or major problem. Connect important actions to their reasons and consequences. "
+    "Explain a character's goal, misunderstanding or hidden danger when the source establishes it. "
+    "Use an omniscient narrator to reveal source-supported context before the consequence appears, "
+    "but never invent facts, motives, relationships or events. Move quickly through filler and "
+    "spend more words on conflict, danger, reversals, reveals and the climax. Use varied time and "
+    "contrast transitions. Keep the output easy to follow when heard once, natural for TTS, and "
+    "emotionally engaging without exaggerating every line. The result must feel like a polished "
+    "Facebook/TikTok/YouTube drama recap, not a transcript, subtitle file or literal translation. "
+)
+
 _STORY_CORE = (
     "NARRATION STYLE (drama-recap, third person): the source lines are raw speech-to-text of "
     "characters TALKING. Do NOT translate them as direct dialogue and do NOT use quotation marks. "
@@ -212,6 +227,7 @@ _STORY_MY = (
 )
 
 _STORY_DE = (
+    _CINEMATIC_RECAP_STYLE +
     "GERMAN STORYTELLER VOICE (very important): write like a real German person who tells a "
     "friend over coffee what happened in a series. It must NOT sound like a translation, a "
     "newspaper article, a school essay or a subtitle file. "
@@ -266,6 +282,7 @@ _STORY_DE = (
 )
 
 _STORY_EN = (
+    _CINEMATIC_RECAP_STYLE +
     "ENGLISH DRAMATIC RECAP NARRATOR (very important): you are a cinematic drama-recap "
     "narrator for a YouTube/TikTok recap channel. Your voice is tense, gripping and emotional — "
     "like a movie trailer narrator telling the story to a viewer who cannot look away. It must "
@@ -330,6 +347,7 @@ _STORY_EN = (
 )
 
 _STORY_ES = (
+    _CINEMATIC_RECAP_STYLE +
     "NARRADOR DE RECAPITULACIÓN EN ESPAÑOL (muy importante): escribe como una persona "
     "española real que le cuenta a un amigo en el café lo que pasó en una serie. NO debe sonar "
     "como una traducción, un artículo de periódico, un ensayo escolar ni un archivo de subtítulos. "
@@ -544,7 +562,8 @@ LANG_CONF = {
                 accent=("Speak clear, natural Japanese for a movie-recap narration. Use polite but "
                         "conversational wording, natural pauses with Japanese punctuation, and keep "
                         "the emotion of the scene."),
-                story=("日本語の映画・ドラマ紹介ナレーションとして書く。会話をそのまま引用せず、 "
+                story=_CINEMATIC_RECAP_STYLE +
+                      ("日本語の映画・ドラマ紹介ナレーションとして書く。会話をそのまま引用せず、 "
                        "誰が誰に何を言ったのかを三人称で自然に説明する。時制は基本的に現在形にし、 "
                        "名前と人物の関係を一貫させる。")
             )
@@ -1539,16 +1558,23 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     cap.release()
 
     auto = detect_crop(src) if s.crop else None
-    base_rect = resolve_crop(src_w, src_h, s, auto)
+    target_aspect = ASPECTS.get(getattr(s, "aspect", "9:16"))
+    source_is_square = abs((src_w / max(1, src_h)) - 1.0) < 0.05
+    # Square input: never crop it for vertical output. Keep the complete 1:1
+    # frame in the center and use an enlarged blurred copy to fill the canvas.
+    square_blur_layout = bool(source_is_square and target_aspect and
+                              abs(target_aspect - 1.0) > 0.08)
+    if square_blur_layout:
+        base_rect = (0, 0, src_w, src_h)
+    else:
+        base_rect = resolve_crop(src_w, src_h, s, auto)
     W, H = out_size(base_rect, s.height, getattr(s, "aspect", "9:16"))
     # rawvideo/yuv420p encoders require positive even dimensions. Keep the
     # invariant here even if a crop detector returns unusual dimensions.
     W = max(2, int(W) // 2 * 2)
     H = max(2, int(H) // 2 * 2)
     rect = zoom_rect(base_rect, s.zoom)
-    target_aspect = ASPECTS.get(getattr(s, "aspect", "9:16"))
-    source_is_square = abs((src_w / max(1, src_h)) - 1.0) < 0.03
-    blur_bg = bool(source_is_square and target_aspect and abs(target_aspect - 1.0) > 0.08)
+    blur_bg = square_blur_layout
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
@@ -1879,10 +1905,11 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     base = _preview_frame_at(src, cache_dir, s.height, s.crop, t)
     src_h, src_w = base.shape[:2]
     mirror = s.mirror_phase(t)
-    W, H = out_size((0, 0, src_w, src_h), s.height, getattr(s, "aspect", "9:16"))
     target_aspect = ASPECTS.get(getattr(s, "aspect", "9:16"))
-    blur_bg = bool(abs((src_w / max(1, src_h)) - 1.0) < 0.03 and
-                   target_aspect and abs(target_aspect - 1.0) > 0.08)
+    square_blur_layout = bool(abs((src_w / max(1, src_h)) - 1.0) < 0.05 and
+                              target_aspect and abs(target_aspect - 1.0) > 0.08)
+    W, H = out_size((0, 0, src_w, src_h), s.height, getattr(s, "aspect", "9:16"))
+    blur_bg = square_blur_layout
     fr = apply_view(base, (0, 0, src_w, src_h), W, H, mirror,
                     blur_bg=blur_bg)
     fr = zoom_flip(fr, s.zoom, False)
@@ -2925,4 +2952,4 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         launch_ui()
     else:
-        main()   
+        main()
