@@ -2843,7 +2843,7 @@ def launch_ui():
 
         with gr.Accordion("🔊 ဘာသာစကား + အသံ", open=True):
             lang = gr.Radio(list(LANGS), value="မြန်မာ", label="ဘာသာစကား")
-            voice = gr.Dropdown(voices_for("my"), value="nara:thazin", label="TTS voice (Edge / Nara offline)")
+            voice = gr.Dropdown(voices_for("my"), value="my-MM-ThihaNeural", label="TTS voice (Edge / Nara offline)")
             with gr.Row():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="အသံမြန်နှုန်း (Edge / Nara) %")
@@ -2982,4 +2982,4 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         launch_ui()
     else:
-        main()
+        main() 
