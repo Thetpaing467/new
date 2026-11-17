@@ -1021,14 +1021,18 @@ def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR, blur_bg=False):
         f = cv2.flip(f, 1)
     sh, sw = f.shape[:2]
     if blur_bg:
-        # Keep the complete source frame visible over a blurred, enlarged copy.
-        cover = max(W / max(1, sw), H / max(1, sh))
-        bw, bh = max(W, int(round(sw * cover))), max(H, int(round(sh * cover)))
-        bg = cv2.resize(f, (bw, bh), interpolation=cv2.INTER_LINEAR)
-        x0, y0 = max(0, (bw - W) // 2), max(0, (bh - H) // 2)
-        bg = bg[y0:y0 + H, x0:x0 + W]
-        bg = cv2.GaussianBlur(bg, (0, 0), max(5.0, min(W, H) * 0.025))
-        bg = np.clip(bg.astype(np.float32) * 0.72, 0, 255).astype(np.uint8)
+        # Work on a tiny background copy; keep the centered foreground at full quality.
+        k = 8
+        cw_, ch_ = max(2, W // k), max(2, H // k)
+        cover = max(cw_ / max(1, sw), ch_ / max(1, sh))
+        bw = max(cw_, int(round(sw * cover)))
+        bh = max(ch_, int(round(sh * cover)))
+        bg = cv2.resize(f, (bw, bh), interpolation=cv2.INTER_AREA)
+        x0, y0 = (bw - cw_) // 2, (bh - ch_) // 2
+        bg = bg[y0:y0 + ch_, x0:x0 + cw_]
+        bg = cv2.GaussianBlur(bg, (0, 0), 2.0)
+        bg = cv2.resize(bg, (W, H), interpolation=cv2.INTER_LINEAR)
+        bg = cv2.convertScaleAbs(bg, alpha=0.72)
         fit = min(W / max(1, sw), H / max(1, sh))
         fw, fh = max(2, int(round(sw * fit))), max(2, int(round(sh * fit)))
         fg = cv2.resize(f, (fw, fh), interpolation=interp)
@@ -1577,6 +1581,7 @@ def prepare_video(src, dst, target_h, crop=True):
 
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
+    cv2.setNumThreads(1)
     cap = cv2.VideoCapture(src)
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -1624,21 +1629,8 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     target_workers = int(s.render_workers) if int(s.render_workers) > 0 else min(cpu, 6)
     target_workers = max(1, target_workers)
     raw_edges = [int(round(nfr * i / target_workers)) for i in range(target_workers + 1)]
-    if seg_len > 0:
-        boundaries_fr = {0, nfr}
-        k = 1
-        while k * seg_len * fps_out < nfr:
-            boundaries_fr.add(int(round(k * seg_len * fps_out)))
-            k += 1
-        merged = set(raw_edges) | boundaries_fr
-        edges = sorted(merged)
-        min_frames = fps_out
-        edges = [e for i, e in enumerate(edges)
-                 if i == 0 or i == len(edges) - 1 or (e - edges[i - 1]) >= min_frames
-                 or (edges[i + 1] - e) >= min_frames or (e - edges[i - 1]) < min_frames]
-        edges = sorted(set(edges))
-    else:
-        edges = raw_edges
+    # Split only by worker count; mirror changes are handled per frame below.
+    edges = sorted(set(raw_edges))
 
     nw = len(edges) - 1
     # FIX: chunk အရေအတွက် (nw) က mirror_every ကြောင့် ရာနဲ့ချီနိုင်တယ်၊
@@ -1658,7 +1650,6 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         cap_ = cv2.VideoCapture(src)
         q = queue.Queue(maxsize=48)
         lstop = threading.Event()
-        chunk_mirror = mirror_at(j0 / fps_out)
 
         def put(x):
             while not lstop.is_set() and not abort.is_set():
@@ -1672,7 +1663,7 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         producer_error = []
 
         def producer():
-            cur, last = -1, None
+            cur, last, last_m = -1, None, None
             ui = 0
             T0 = j0 / fps_out
             while ui < len(plan) - 1 and T0 >= plan[ui + 1][0]:
@@ -1700,13 +1691,18 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                             break
                         cur += 1
                         new = True
+                    m = mirror_at(T)
                     if new:
                         ok, f = cap_.retrieve()
                         if ok:
-                            last = apply_view(f, rect, W, H, chunk_mirror, interp, blur_bg=blur_bg)
+                            last = apply_view(f, rect, W, H, m, interp, blur_bg=blur_bg)
+                            last_m = m
                     if last is None:
                         raise RuntimeError(
                             f"source frame မဖတ်နိုင်ပါ (frame {idx}, chunk {pi})")
+                    if m != last_m:
+                        last = cv2.flip(last, 1)
+                        last_m = m
                     out_fr = center_zoom(last, pz) if pz > 1.001 else last.copy()
                     if not put(out_fr):
                         return
