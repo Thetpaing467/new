@@ -2472,11 +2472,15 @@ def launch_ui():
     PORT = int(os.environ.get("PORT", "7860"))
     LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en", "စပိန်": "es", "ဂျပန်": "ja"}
 
-    HIDDEN_EDGE_VOICES = {"my-MM-ThihaNeural", "my-MM-NilarNeural"}
+    HIDDEN_EDGE_VOICES = {"my-MM-NilarNeural"}
 
     def voices_for(code):
-        return [v for v, _ in LANG_CONF[code]["edge_voices"]
-                if v not in HIDDEN_EDGE_VOICES]
+        voices = [v for v, _ in LANG_CONF[code]["edge_voices"]
+                  if v not in HIDDEN_EDGE_VOICES]
+        if code == "my" and "my-MM-ThihaNeural" in voices:
+            voices.remove("my-MM-ThihaNeural")
+            voices.insert(0, "my-MM-ThihaNeural")
+        return voices
 
     def _cb(progress):
         return lambda frac, label=None: progress(frac, desc=label or "")
@@ -2982,4 +2986,4 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         launch_ui()
     else:
-        main() 
+        main()
