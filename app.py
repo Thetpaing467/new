@@ -1967,6 +1967,20 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.08)
     fr = apply_view(base, rect, W, H, mirror, blur_bg=blur_bg)
     fr = zoom_flip(fr, s.zoom, False)
+    # Preview marker: show where Part-1 will appear. Final files receive
+    # their own static Part-N label after splitting.
+    label = "Part-1"
+    label_scale = max(1.0, H / 420.0)
+    label_th = max(2, int(round(H / 320.0)))
+    (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
+                                   label_scale, label_th)
+    lx = max(0, (W - tw) // 2)
+    ly = max(th + bl + 2, int(H * 0.16))
+    cv2.putText(fr, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                label_scale, (0, 0, 0), label_th + max(3, label_th // 2),
+                cv2.LINE_AA)
+    cv2.putText(fr, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                label_scale, GOLD, label_th, cv2.LINE_AA)
     # Neon border removed from preview as well.
     if font_path and s.sub:
         ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
