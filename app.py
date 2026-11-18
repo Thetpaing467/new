@@ -1839,6 +1839,54 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
         progress(1.0, "Video render")
     return out
 
+# ---- automatic part labels
+_LABEL_FONT = None
+
+def _part_label_font():
+    global _LABEL_FONT
+    if _LABEL_FONT and os.path.exists(_LABEL_FONT):
+        return _LABEL_FONT
+    candidates = [
+        os.environ.get("RECAP_LABEL_FONT", ""),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            _LABEL_FONT = path
+            return path
+    found = glob.glob("/usr/share/fonts/**/*Bold*.ttf", recursive=True)
+    _LABEL_FONT = found[0] if found else ""
+    return _LABEL_FONT
+
+def add_part_labels(src, out, seg_min):
+    """Add Part-1, Part-2... to the upper blurred area; never show total count."""
+    total = probe_duration(src)
+    plan = split_plan(total, float(seg_min) * 60.0)
+    if len(plan) <= 1:
+        return src
+    font = _part_label_font()
+    if not font:
+        raise RuntimeError("Part label အတွက် font မတွေ့ပါ")
+    vf = []
+    for i, (start, dur) in enumerate(plan, 1):
+        end = start + dur
+        text = f"Part-{i}"
+        enable = f"between(t,{start:.3f},{end:.3f})"
+        # Gold text with a dark outline, centered in the upper blur area.
+        vf.append(
+            "drawtext="
+            f"fontfile='{font}':text='{text}':fontcolor=0xFFD43B:"
+            "bordercolor=black:borderw=4:fontsize=h*0.07:"
+            f"x=(w-text_w)/2:y=h*0.16:enable='{enable}'"
+        )
+    vf_expr = ",".join(vf)
+    sh(["ffmpeg", "-y", "-i", src, "-vf", vf_expr,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
+        "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out])
+    return out
+
 # ---- splitter
 def split_plan(total, seg_secs):
     total, seg = float(total), float(seg_secs)
@@ -2754,6 +2802,11 @@ def launch_ui():
             files = [out]
             split_note = ""
             if s.split and s.split_min > 0:
+                # Add only Part-N (no /total) before splitting so each part keeps its label.
+                label_tmp = out + ".label.mp4"
+                labeled = add_part_labels(out, label_tmp, s.split_min)
+                if labeled != out:
+                    os.replace(labeled, out)
                 parts_out = split_video(out, os.path.splitext(out)[0], s.split_min)
                 if len(parts_out) > 1:
                     files = parts_out
