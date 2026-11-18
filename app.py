@@ -1859,29 +1859,19 @@ def _part_label_font():
     _LABEL_FONT = found[0] if found else ""
     return _LABEL_FONT
 
-def add_part_labels(src, out, seg_min):
-    """Add Part-1, Part-2... to the upper blurred area; never show total count."""
-    total = probe_duration(src)
-    plan = split_plan(total, float(seg_min) * 60.0)
-    if len(plan) <= 1:
-        return src
+def add_part_label(src, out, part_no):
+    """Add one static Part-N label to an already split file."""
     font = _part_label_font()
     if not font:
         raise RuntimeError("Part label အတွက် font မတွေ့ပါ")
-    vf = []
-    for i, (start, dur) in enumerate(plan, 1):
-        end = start + dur
-        text = f"Part-{i}"
-        enable = f"between(t,{start:.3f},{end:.3f})"
-        # Gold text with a dark outline, centered in the upper blur area.
-        vf.append(
-            "drawtext="
-            f"fontfile='{font}':text='{text}':fontcolor=0xFFD43B:"
-            "bordercolor=black:borderw=4:fontsize=h*0.07:"
-            f"x=(w-text_w)/2:y=h*0.16:enable='{enable}'"
-        )
-    vf_expr = ",".join(vf)
-    sh(["ffmpeg", "-y", "-i", src, "-vf", vf_expr,
+    text = f"Part-{int(part_no)}"
+    vf = (
+        "drawtext="
+        f"fontfile='{font}':text='{text}':fontcolor=0xFFD43B:"
+        "bordercolor=black:borderw=4:fontsize=h*0.07:"
+        "x=(w-text_w)/2:y=h*0.16"
+    )
+    sh(["ffmpeg", "-y", "-i", src, "-vf", vf,
         "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out])
@@ -2802,13 +2792,17 @@ def launch_ui():
             files = [out]
             split_note = ""
             if s.split and s.split_min > 0:
-                # Add only Part-N (no /total) before splitting so each part keeps its label.
-                label_tmp = out + ".label.mp4"
-                labeled = add_part_labels(out, label_tmp, s.split_min)
-                if labeled != out:
-                    os.replace(labeled, out)
+                # Split first, then label each part independently so Part-1 can
+                # never spill into the beginning of Part-2.
                 parts_out = split_video(out, os.path.splitext(out)[0], s.split_min)
                 if len(parts_out) > 1:
+                    labeled_parts = []
+                    for part_no, part_path in enumerate(parts_out, 1):
+                        label_tmp = part_path + ".label.mp4"
+                        add_part_label(part_path, label_tmp, part_no)
+                        os.replace(label_tmp, part_path)
+                        labeled_parts.append(part_path)
+                    parts_out = labeled_parts
                     files = parts_out
                     durs = [probe_duration(p) for p in parts_out]
                     split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း: "
