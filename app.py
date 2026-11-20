@@ -1,6 +1,6 @@
 """Recap CLI (slim): Whisper -> Gemini (manual) -> Edge TTS -> smart-sync render -> auto split.
 
-Languages: Burmese (my) / German (de) / English (en) / Spanish (es) / Japanese (ja)
+Languages: Burmese (my) / German (de) / English (en) / Spanish (es)
 Sources: YouTube / TikTok (yt-dlp), Rednote, local file
 
 Usage: python recap.py run <video|url> -d work/ep1 --lang my
@@ -477,9 +477,9 @@ LANG_CONF = {
         "name": "English", "label": "အင်္ဂလိပ်",
         "sample": "This is a sample subtitle line.",
         "rate": 5, "trim": TRIM_EN,
-        "edge_voices": [("en-GB-SoniaNeural", "Sonia (female, UK)"),
+        "edge_voices": [("en-US-GuyNeural", "Guy (male, US)"),
+                        ("en-GB-SoniaNeural", "Sonia (female, UK)"),
                         ("en-US-AriaNeural", "Aria (female, US)"),
-                        ("en-US-GuyNeural", "Guy (male, US)"),
                         ("en-US-JennyNeural", "Jenny (female, US)"),
                         ("en-GB-RyanNeural", "Ryan (male, UK)"),
                         ("en-AU-NatashaNeural", "Natasha (female, AU)")],
@@ -2527,7 +2527,7 @@ def launch_ui():
     BASE = os.path.join(os.getcwd(), "work_ui")
     os.makedirs(BASE, exist_ok=True)
     PORT = int(os.environ.get("PORT", "7860"))
-    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en", "စပိန်": "es", "ဂျပန်": "ja"}
+    LANGS = {"မြန်မာ": "my", "ဂျာမနီ": "de", "အင်္ဂလိပ်": "en", "စပိန်": "es"}
 
     HIDDEN_EDGE_VOICES = {"my-MM-NilarNeural"}
 
@@ -2586,7 +2586,7 @@ def launch_ui():
 </script>
 """
     ui_kw = {
-        "title": "Recap → my / de / en / es / ja",
+        "title": "Recap → my / de / en / es",
         "theme": gr.themes.Base(primary_hue="indigo", secondary_hue="purple", neutral_hue="slate"),
         "css": ":root, html, body, gradio-app { color-scheme: dark; }"
                " body, gradio-app, .gradio-container { background: #0b0f19 !important; }"
@@ -2787,7 +2787,7 @@ def launch_ui():
 
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
             s.sub_sweep = bool(sweep)
-            s.punch = bool(punch)
+            s.punch = False
             s.punch_every, s.punch_hold, s.punch_zoom = 3.0, 0.5, 1.15
             # Neon border disabled
             s.neon = False
@@ -2834,8 +2834,9 @@ def launch_ui():
         except Exception as ex:
             raise gr.Error(str(ex)[:600])
 
-        mb = os.path.getsize(out) / 1e6
-        return (out, files,
+        display_out = files[0] if len(files) > 1 else out
+        mb = os.path.getsize(display_out) / 1e6
+        return (display_out, files,
                 f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
                 + split_note)
 
@@ -2898,8 +2899,8 @@ def launch_ui():
         return " ".join("#" + tag for tag in tags)
 
     with gr.Blocks(**blocks_kw) as demo:
-        gr.Markdown(f"# 🎙️ Recap → my / de / en / es / ja  `v{__version__}`\n"
-                    f"Whisper → Gemini → TTS (Edge / Nara offline, shared speed control) → Smart Sync → စာတန်း · Mirror=5s · Render=4 · Split=1.03min")
+        gr.Markdown(f"# 🎙️ Recap → my / de / en / es  `v{__version__}`\n"
+                    f"Whisper → Gemini → TTS (Edge / Nara offline) → Smart Sync → စာတန်း · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
         aspect = gr.State("9:16")
@@ -2918,19 +2919,14 @@ def launch_ui():
                 rate = gr.Slider(-50, 100, value=LANG_CONF["my"]["rate"], step=5,
                                  label="အသံမြန်နှုန်း (Edge / Nara) %")
                 workers = gr.Slider(1, 10, value=8, step=1, label="TTS တစ်ပြိုင်နက်")
-            max_speed = gr.Radio([("1.25× (သဘာဝကျ၊ ဇာတ်ခန်း ပိုပျောက်)", 1.25),
-                                  ("1.5× (ဇာတ်ခန်း ပိုပါ၊ ပိုမြန်)", 1.5)],
-                                 value=1.5, label="Video အမြန်ဆုံး နှုန်း")
+            max_speed = gr.State(1.25)
             lang.change(on_lang_change, lang, [voice, rate])
 
-        with gr.Accordion("🎵 Background music + Voice အသံ", open=False):
-            bgm_file = gr.File(label="🎵 Background music (optional)",
-                               type="filepath",
-                               file_types=[".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"])
-            with gr.Row():
-                bgm_vol = gr.Slider(0.0, 1.0, value=0.25, step=0.05, label="BGM အသံ")
-                voice_db = gr.Slider(-6, 12, value=0, step=1, label="Voice အပို gain (dB)")
-                duck = gr.Checkbox(True, label="🦆 Ducking")
+        # Background music controls are intentionally hidden; voice-only output is used.
+        bgm_file = gr.State("")
+        bgm_vol = gr.State(0.25)
+        voice_db = gr.State(0)
+        duck = gr.State(True)
 
         gr.Markdown("### 📥 Video")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
@@ -2956,7 +2952,7 @@ def launch_ui():
                 sub = gr.Checkbox(True, label="စာတန်း")
                 sweep = gr.Checkbox(True, label="🎵 Music sweep")
                 flip = gr.Checkbox(True, label="Mirror")
-                punch = gr.Checkbox(True, label="🔍 ၃ စက္ကန့်တိုင်း ရပ်ပြီး Zoom")
+                punch = gr.State(False)
             sub_size = gr.Slider(3.0, 12.0, value=7.0, step=0.5, label="စာအရွယ် (% width)")
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
