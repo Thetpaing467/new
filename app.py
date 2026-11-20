@@ -1964,7 +1964,9 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     rect = user_crop((0, 0, src_w, src_h), s)
     target_aspect = ASPECTS["9:16"]
     W, H = out_size(rect, s.height, "9:16")
-    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.08)
+    # Preview should use the same 9:16 fit layout as the final render:
+    # keep the source fully visible and fill the upper/lower empty area with blur.
+    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.02)
     fr = apply_view(base, rect, W, H, mirror, blur_bg=blur_bg)
     fr = zoom_flip(fr, s.zoom, False)
     # Preview marker: show where Part-1 will appear. Final files receive
@@ -2935,8 +2937,9 @@ def launch_ui():
 
         gr.Markdown("### 🎨 Preview")
         pv_img = gr.Image(label="Preview (ရလဒ်)", type="filepath", interactive=False)
-        # Hidden state: tapping the preview image sets this time and refreshes the frame.
-        pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1, visible=False)
+        # Visible time control: move through the first 5 seconds and refresh the frame.
+        pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
+                         label="⏱️ Preview အချိန် (0–5 စက္ကန့်)", visible=True)
 
         with gr.Accordion("✂️ Video Crop (အလယ် video)", open=False):
             crop_l = gr.Slider(0, 40, value=0, step=0.5, label="ဘယ်ဘက် ဖြတ် %")
