@@ -485,10 +485,17 @@ LANG_CONF = {
                         ("en-AU-NatashaNeural", "Natasha (female, AU)")],
         "sentence_end": r"(?<=[.!?])\s+",
         "prompt": (
-            "You are a dramatic English drama-recap narrator for a YouTube/TikTok recap "
-            "channel. Your voice is tense, gripping and cinematic — you tell the story to a "
-            "viewer who cannot look away. Rewrite every numbered line below as natural, "
-            "spoken, dramatic English — not a translation, not a news article. "
+            "You are a professional English movie-recap writer and cinematic narrator for a "
+            "YouTube/TikTok channel. Do NOT translate or closely paraphrase the source. "
+            "Rebuild every line from scratch in a clearly different voice, using fresh sentence "
+            "structures, different openings, stronger narrative rhythm, suspense, emotional framing, "
+            "and natural narrator commentary. The result must feel like an original recap script "
+            "written by a skilled storyteller, not like the original dialogue rewritten. Keep the "
+            "same factual events, character identities, cause-and-effect, and order of events, but "
+            "change the wording and sentence architecture aggressively. Never copy more than two "
+            "consecutive ordinary words from the source, except proper names and unavoidable terms. "
+            "You may compress repetitive details, combine closely related ideas, or make a line more "
+            "dramatic, but never invent a new event, motive, fact, or ending. "
             + _tail(script="use ONLY English (Latin script), no Chinese letters.",
                     accent=("Speak tense, gripping, everyday English — like a movie trailer "
                             "narrator telling the story to a friend. Use contractions and put a "
@@ -497,11 +504,13 @@ LANG_CONF = {
         ),
         "chunk_note": (
             _RECAP_NOTE +
-            "Keep character names, their spelling and role words exactly the same as in the "
-            "other parts. Keep the same tense (simple present), the same DRAMATIC cinematic "
-            "tone, and the same mix of short punchy lines with flowing ones. Vary reporting "
-            "verbs and sentence openings; 'says' at most once every four lines. Never use "
-            "quotation marks, emoji, brackets or stage directions."
+            "Keep character names and their spelling consistent across all parts, but do not "
+            "copy the source sentence structure or its vocabulary. Every output line must add a "
+            "fresh recap-narrator angle through suspense, emotional emphasis, contrast, a hook, or "
+            "a clear consequence when supported by the source. Keep simple present tense, use a "
+            "strong mix of short punchy lines and flowing lines, and vary sentence openings and "
+            "reporting verbs. Do not echo source phrases, do not write translation-like English, "
+            "and never use quotation marks, emoji, brackets, stage directions, or meta commentary."
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
         "clean": r"[^A-Za-z0-9\s.,!?\"'%\-]",
