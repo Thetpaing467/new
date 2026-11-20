@@ -42,7 +42,7 @@ from PIL import Image, ImageDraw, ImageFont, features
 # ======================================================================
 TARGET, MAXD = 4.2, 5.6
 SUB_LINES = 2
-PREVIEW_SECS = 5.0
+PREVIEW_SECS = 30.0
 CHUNK = 100
 
 ASPECTS = {"free": None, "9:16": 9 / 16, "1:1": 1.0, "4:5": 4 / 5,
@@ -1969,8 +1969,8 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
     blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.02)
     fr = apply_view(base, rect, W, H, mirror, blur_bg=blur_bg)
     fr = zoom_flip(fr, s.zoom, False)
-    # Preview marker: show where Part-1 will appear. Final files receive
-    # their own static Part-N label after splitting.
+    # Preview marker: match the final Part-N label style exactly:
+    # gold text with a black outline, centered in the upper blur area.
     label = "Part-1"
     label_scale = max(1.0, H / 420.0)
     label_th = max(2, int(round(H / 320.0)))
@@ -1982,11 +1982,14 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
                 label_scale, (0, 0, 0), label_th + max(3, label_th // 2),
                 cv2.LINE_AA)
     cv2.putText(fr, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
-                label_scale, GOLD, label_th, cv2.LINE_AA)
-    # Neon border removed from preview as well.
+                label_scale, (40, 214, 255), label_th, cv2.LINE_AA)
+    # Match final video subtitle: same glass box, gold Burmese text, and outline.
     if font_path and s.sub:
-        ov = build_overlay(text, W, H, font_path, max(16, int(W * s.sub_size / 100)),
-                           s.sub_pos, alpha=int(s.sub_alpha), is_mm=is_mm)
+        preview_text = text or "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။"
+        ov = build_overlay(preview_text, W, H, font_path,
+                           max(16, int(W * s.sub_size / 100)),
+                           s.sub_pos, alpha=int(s.sub_alpha), color=GOLD,
+                           is_mm=is_mm)
         if ov:
             blend_overlay(fr, ov, (t / PREVIEW_SECS) if s.sub_sweep else None)
     cv2.imwrite(out_png, fr)
@@ -2939,7 +2942,7 @@ def launch_ui():
         pv_img = gr.Image(label="Preview (ရလဒ်)", type="filepath", interactive=False)
         # Visible time control: move through the first 5 seconds and refresh the frame.
         pv_t = gr.Slider(0.0, PREVIEW_SECS, value=0.0, step=0.1,
-                         label="⏱️ Preview အချိန် (0–5 စက္ကန့်)", visible=True)
+                         label="⏱️ Preview အချိန် (0–30 စက္ကန့်)", visible=True)
 
         with gr.Accordion("✂️ Video Crop (အလယ် video)", open=False):
             crop_l = gr.Slider(0, 40, value=0, step=0.5, label="ဘယ်ဘက် ဖြတ် %")
