@@ -485,17 +485,10 @@ LANG_CONF = {
                         ("en-AU-NatashaNeural", "Natasha (female, AU)")],
         "sentence_end": r"(?<=[.!?])\s+",
         "prompt": (
-            "You are a professional English movie-recap writer and cinematic narrator for a "
-            "YouTube/TikTok channel. Do NOT translate or closely paraphrase the source. "
-            "Rebuild every line from scratch in a clearly different voice, using fresh sentence "
-            "structures, different openings, stronger narrative rhythm, suspense, emotional framing, "
-            "and natural narrator commentary. The result must feel like an original recap script "
-            "written by a skilled storyteller, not like the original dialogue rewritten. Keep the "
-            "same factual events, character identities, cause-and-effect, and order of events, but "
-            "change the wording and sentence architecture aggressively. Never copy more than two "
-            "consecutive ordinary words from the source, except proper names and unavoidable terms. "
-            "You may compress repetitive details, combine closely related ideas, or make a line more "
-            "dramatic, but never invent a new event, motive, fact, or ending. "
+            "You are a dramatic English drama-recap narrator for a YouTube/TikTok recap "
+            "channel. Your voice is tense, gripping and cinematic — you tell the story to a "
+            "viewer who cannot look away. Rewrite every numbered line below as natural, "
+            "spoken, dramatic English — not a translation, not a news article. "
             + _tail(script="use ONLY English (Latin script), no Chinese letters.",
                     accent=("Speak tense, gripping, everyday English — like a movie trailer "
                             "narrator telling the story to a friend. Use contractions and put a "
@@ -504,13 +497,11 @@ LANG_CONF = {
         ),
         "chunk_note": (
             _RECAP_NOTE +
-            "Keep character names and their spelling consistent across all parts, but do not "
-            "copy the source sentence structure or its vocabulary. Every output line must add a "
-            "fresh recap-narrator angle through suspense, emotional emphasis, contrast, a hook, or "
-            "a clear consequence when supported by the source. Keep simple present tense, use a "
-            "strong mix of short punchy lines and flowing lines, and vary sentence openings and "
-            "reporting verbs. Do not echo source phrases, do not write translation-like English, "
-            "and never use quotation marks, emoji, brackets, stage directions, or meta commentary."
+            "Keep character names, their spelling and role words exactly the same as in the "
+            "other parts. Keep the same tense (simple present), the same DRAMATIC cinematic "
+            "tone, and the same mix of short punchy lines with flowing ones. Vary reporting "
+            "verbs and sentence openings; 'says' at most once every four lines. Never use "
+            "quotation marks, emoji, brackets or stage directions."
         ),
         "font_keys": ("dejavusans", "dejavu", "liberation", "notosans", "arial", "freesans"),
         "clean": r"[^A-Za-z0-9\s.,!?\"'%\-]",
@@ -1886,6 +1877,30 @@ def add_part_label(src, out, part_no):
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out])
     return out
 
+def add_full_part_labels(src, out, seg_min):
+    """Create a full-length display copy with Part-N labels on each segment."""
+    font = _part_label_font()
+    if not font:
+        raise RuntimeError("Part label အတွက် font မတွေ့ပါ")
+    total = probe_duration(src)
+    plan = split_plan(total, float(seg_min) * 60.0)
+    if len(plan) <= 1:
+        return src
+    filters = []
+    for i, (start, dur) in enumerate(plan, 1):
+        end = start + dur
+        filters.append(
+            "drawtext="
+            f"fontfile='{font}':text='Part-{i}':fontcolor=0xFFD43B:"
+            "bordercolor=black:borderw=4:fontsize=h*0.07:"
+            f"x=(w-text_w)/2:y=h*0.16:enable='between(t,{start:.3f},{end:.3f})'"
+        )
+    sh(["ffmpeg", "-y", "-i", src, "-vf", ",".join(filters),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
+        "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out])
+    return out
+
 # ---- splitter
 def split_plan(total, seg_secs):
     total, seg = float(total), float(seg_secs)
@@ -2843,7 +2858,12 @@ def launch_ui():
         except Exception as ex:
             raise gr.Error(str(ex)[:600])
 
-        display_out = files[0] if len(files) > 1 else out
+        # Keep the main result full length; show Part-N labels across its timeline.
+        display_out = out
+        if len(files) > 1:
+            full_label_tmp = out + ".full_label.mp4"
+            add_full_part_labels(out, full_label_tmp, s.split_min)
+            display_out = full_label_tmp
         mb = os.path.getsize(display_out) / 1e6
         return (display_out, files,
                 f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
