@@ -875,7 +875,7 @@ GLASS_TINT = np.array([86, 104, 124], np.float32)
 GOLD = (255, 214, 40)
 
 def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
-                  layout="raqm", is_mm=True):
+                  layout="raqm", is_mm=True, box=False):
     mx = int(W * 0.04)
     bw = W - 2 * mx
     pad_x, pad_y = int(fs * 0.6), int(fs * 0.5)
@@ -924,9 +924,14 @@ def build_overlay(text, W, H, font_path, fs, pos_y, alpha=140, color=GOLD,
     a = arr[:, :, 3:4].astype(np.float32) / 255.0
     bgr = arr[:, :, [2, 1, 0]].astype(np.float32)
     tm = (np.array(ink_img).astype(np.float32) / 255.0)[:, :, None]
+    # box=False keeps only the text pixels; the subtitle glass/blur panel is removed.
+    box_mask = mask if box else np.zeros_like(mask)
+    box_edge = edge if box else np.zeros_like(edge)
+    box_sheen = sheen if box else np.zeros_like(sheen)
     return {"y0": box_y, "y1": box_y + bh, "x0": mx, "x1": mx + bw,
-            "mask": mask[:, :, None], "edge": edge[:, :, None], "sheen": sheen,
-            "tint_a": max(0.0, min(float(alpha) / 255.0, 1.0)),
+            "mask": box_mask[:, :, None], "edge": box_edge[:, :, None],
+            "sheen": box_sheen,
+            "tint_a": max(0.0, min(float(alpha) / 255.0, 1.0)) if box else 0.0,
             "sigma": max(3.0, fs * 0.30),
             "inv": 1.0 - a, "pre": bgr * a, "tm": tm,
             "xs": np.arange(bw, dtype=np.float32)[None, :, None]}
@@ -3078,4 +3083,4 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         launch_ui()
     else:
-        main()
+       main()
