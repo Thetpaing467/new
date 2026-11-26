@@ -9,7 +9,15 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-__version__ = "1.27.4"
+import spaces
+
+
+@spaces.GPU
+def _gpu_placeholder():
+    return 0
+
+
+__version__ = "1.28.0"
 
 import argparse
 import asyncio
@@ -621,7 +629,9 @@ class Settings:
     render_workers: int = 4        # default 4  (hidden from UI)
     split: bool = True
     split_min: float = 1.03
+    part_label: bool = True
     sub: bool = True
+    sub_box: bool = True
     sub_size: float = 7.0
     sub_pos: int = 90
     sub_alpha: int = 140
@@ -1054,8 +1064,12 @@ def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR, blur_bg=False):
 def out_size(rect, height, aspect="free"):
     ratio = ASPECTS.get(aspect) if aspect in ASPECTS else None
     if int(height) <= 0:
+        if aspect == "16:9":
+            # Original HD: use the long side, so a portrait source still gives full HD.
+            W = max(2, int(max(rect[2], rect[3])) // 2 * 2)
+            return W, max(2, int(round(W / ratio / 2)) * 2)
         if ratio:
-            W = max(2, min(int(rect[2]), 1080) // 2 * 2)
+            W = max(2, int(rect[2]) // 2 * 2)
             H = max(2, int(round(W / ratio / 2)) * 2)
         else:
             W, H = max(2, int(rect[2]) // 2 * 2), max(2, int(rect[3]) // 2 * 2)
@@ -1066,6 +1080,18 @@ def out_size(rect, height, aspect="free"):
     else:
         W = int(round(rect[2] * H / max(1, rect[3]) / 2)) * 2
     return max(2, W), H
+
+def needs_blur_bg(rect, aspect):
+    """True when the source shape differs enough from the canvas to fit it over blur."""
+    target = ASPECTS.get(aspect)
+    if not target:
+        return False
+    return abs((rect[2] / max(1, rect[3])) / target - 1.0) > 0.08
+
+def sub_font_size(W, H, pct):
+    # Portrait: % of width. Landscape: scale from height so text is not oversized.
+    base = W if W <= H else H * 0.75
+    return max(16, int(base * pct / 100))
 
 def user_crop(rect, s):
     x, y, w, h = rect
@@ -1220,7 +1246,7 @@ def _dl_rednote(url, out, progress=None):
 
 def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
     import yt_dlp
-    height = int(height) or 1080
+    height = int(height)
 
     def hook(d):
         if progress and d.get("status") == "downloading":
@@ -1228,15 +1254,18 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
             if tot:
                 progress(d.get("downloaded_bytes", 0) / tot)
 
+    fmt = (f"bv*[height<={height}][vcodec^=avc1]+ba[ext=m4a]/"
+           f"b[height<={height}][vcodec^=avc1]/"
+           f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b"
+           if height > 0 else "bv*+ba/b")
     opts = {
-        "format": (f"bv*[height<={height}][vcodec^=avc1]+ba[ext=m4a]/"
-                   f"b[height<={height}][vcodec^=avc1]/"
-                   f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b"),
+        "format": fmt,
         "outtmpl": out_noext + ".%(ext)s",
         "merge_output_format": "mp4",
         "noplaylist": True, "quiet": True, "no_warnings": True,
         "retries": 5, "fragment_retries": 5, "concurrent_fragment_downloads": 4,
         "progress_hooks": [hook],
+        "extractor_args": {"youtube": {"player_client": ["tv", "ios", "web"]}},
     }
     if cookies_file and os.path.exists(cookies_file):
         opts["cookiefile"] = cookies_file
@@ -1248,39 +1277,69 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
         raise RuntimeError("yt-dlp ဖိုင် မထွက်ပါ")
     return max(files, key=os.path.getsize)
 
-def ensure_mp4(raw, final, height):
-    """Repair malformed audio while avoiding unnecessary video re-encoding."""
+def _cv2_readable(path):
+    cap = cv2.VideoCapture(path)
     try:
-        codec = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                    "-show_entries", "stream=codec_name", "-of", "csv=p=0", raw]).strip()
-        vh = int(sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                     "-show_entries", "stream=height", "-of", "csv=p=0", raw]).strip())
+        ok, _ = cap.read()
+        return bool(ok)
+    finally:
+        cap.release()
+
+def ensure_mp4(raw, final, height):
+    """Repair malformed audio while avoiding unnecessary video re-encoding.
+
+    H.264 / HEVC up to 1080p is stream-copied (the renderer scales to the output
+    size anyway). Only other codecs or larger videos are transcoded.
+    """
+    try:
+        info = json.loads(sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                              "-show_entries", "stream=codec_name,width,height",
+                              "-of", "json", raw]))["streams"][0]
+        codec = info.get("codec_name", "")
+        short = min(int(info.get("width") or 0), int(info.get("height") or 0))
     except Exception:
-        codec, vh = "", 0
+        codec, short = "", 0
     if not codec:
         raise RuntimeError("Video stream မတွေ့ပါ")
-    target = int(height) or 1080
-    if codec == "h264" and (int(height) <= 0 or (vh and vh <= target)):
-        vopts = ["-c:v", "copy"]
-    else:
-        vopts = ["-vf", f"scale=-2:'min(ih,{target})'",
-                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+    height = int(height)
+    limit = max(height, 1080) if height > 0 else 0      # short side; 0 = no limit
+    can_copy = codec in ("h264", "hevc") and (not limit or 0 < short <= limit)
+    # shrink only the short side, so portrait and landscape are treated alike
+    scale = (f"scale=w='if(gt(iw,ih),-2,min(iw,{limit}))':"
+             f"h='if(gt(iw,ih),min(ih,{limit}),-2)'," if limit else "")
+    transcode = ["-vf", scale + "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
                  "-pix_fmt", "yuv420p"]
-    cmd = ["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
-           "-i", raw, "-map", "0:v:0", "-map", "0:a:0?", *vopts,
-           "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-           "-movflags", "+faststart", final]
+    tmp = final + ".tmp.mp4"
+    attempts = ([["-c:v", "copy"]] if can_copy else []) + [transcode]
+    last = ""
     try:
-        sh(cmd)
-    except Exception as ex:
-        raise RuntimeError("Video/AAC ကို ပြန်ပြင်မရပါ။ " + str(ex)[-500:])
-    return final
+        for vopts in attempts:
+            cmd = ["ffmpeg", "-y", "-loglevel", "error",
+                   "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
+                   "-i", raw, "-map", "0:v:0", "-map", "0:a:0?", *vopts,
+                   "-c:a", "aac", "-aac_coder", "fast", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                   "-movflags", "+faststart", tmp]
+            try:
+                sh(cmd)
+                if not _cv2_readable(tmp):
+                    raise RuntimeError("video frame ဖတ်မရပါ")
+                os.replace(tmp, final)
+                return final
+            except Exception as ex:
+                last = str(ex)
+        raise RuntimeError("Video/AAC ကို ပြန်ပြင်မရပါ။ " + last[-500:])
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 def fetch_video(source, final, height=0, progress=None, cookies_file=None):
     source = extract_url(source)
     if not re.match(r"^https?://", source, re.I):
         if not os.path.isfile(source):
             raise FileNotFoundError(f"ဖိုင် မတွေ့ပါ: {source}")
+        if progress:
+            progress(1.0)
         ensure_mp4(source, final, height)
         return final
     work = tempfile.mkdtemp(prefix="dl_")
@@ -1317,7 +1376,7 @@ def get_model(size):
     if size not in _MODELS:
         from faster_whisper import WhisperModel
         _MODELS[size] = WhisperModel(size, device="cpu", compute_type="int8",
-                                     cpu_threads=os.cpu_count() or 4)
+                                     cpu_threads=2)
     return _MODELS[size]
 
 def _run(wm, audio, lang, fast, vdur, progress):
@@ -1361,8 +1420,52 @@ def transcribe_video(video, workdir, model_size="base", src_lang="auto", fast=Tr
         raise RuntimeError(f"Video က {vdur / 60:.1f} မိနစ်ရှိတယ်။ --max-min ကျော်နေတယ်")
     progress(0.0, "Audio ထုတ်နေတယ်")
     wav = os.path.join(workdir, "audio16k.wav")
-    sh(["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
-        "-i", video, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
+    # Some uploaded files have more than one audio stream, with the first
+    # stream damaged. Do not assume 0:a:0 is the usable one: enumerate every
+    # stream and keep the first WAV that is actually readable by Python.
+    audio_indexes = []
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", video],
+            capture_output=True, text=True, timeout=30)
+        for line in (probe.stdout or "").splitlines():
+            try:
+                audio_indexes.append(int(line.strip()))
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    if not audio_indexes:
+        audio_indexes = [0]
+
+    wav_ok = False
+    last_err = "Audio decode failed"
+    for stream_index in audio_indexes:
+        for extra in (
+            ["-err_detect", "ignore_err", "-fflags", "+discardcorrupt+genpts"],
+            ["-err_detect", "ignore_err", "-analyzeduration", "100M", "-probesize", "100M",
+             "-fflags", "+discardcorrupt+genpts", "-af", "aresample=async=1:first_pts=0"],
+        ):
+            try:
+                if os.path.exists(wav):
+                    os.remove(wav)
+                ff_cmd = (["ffmpeg", "-y"] + extra + ["-i", video,
+                          "-map", f"0:{stream_index}", "-vn", "-sn", "-dn",
+                          "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
+                result = subprocess.run(ff_cmd, capture_output=True, text=True,
+                                        timeout=max(120, int(vdur) + 120))
+                last_err = (result.stderr or last_err)[-1600:]
+                with wave.open(wav) as test_wf:
+                    wav_ok = test_wf.getnframes() > 160
+                if wav_ok:
+                    break
+            except Exception as exc:
+                last_err = str(exc)[-1600:]
+        if wav_ok:
+            break
+    if not wav_ok:
+        raise RuntimeError("AAC audio ကို WAV ပြောင်းမရပါ။ Audio track အားလုံးကို စမ်းပြီးပါပြီ။ " + last_err)
     with wave.open(wav) as wf:
         audio = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
     progress(0.08, "Whisper model ဖွင့်နေတယ်")
@@ -1400,6 +1503,32 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
         if k == total - 1:
             text += "\n\n" + _HASHTAG_INSTRUCTION
         out.append({"lo": lo, "hi": hi, "text": text})
+    return out
+
+_SUBTITLE_MY_PROMPT = (
+    "You are a native Burmese subtitle translator. Translate every numbered source line into "
+    "natural, easy-to-understand spoken Burmese for Myanmar viewers. This is a subtitle translation, "
+    "not a movie recap and not a word-for-word machine translation. Preserve the exact meaning, "
+    "emotion, names, relationships and cause-and-effect in the source. Rewrite idioms naturally "
+    "so a Burmese viewer understands them immediately. Use short, readable subtitle sentences "
+    "that sound like a real person speaking, not a robot, textbook or formal essay. Do not add "
+    "facts, explanations, hooks or commentary that are not in the source. Do not use quotation marks. "
+    "Use Myanmar Unicode only. Keep exactly one output line for every input number, in the same "
+    "order and with the same numbers. Never skip, merge or invent a line. Most lines should end "
+    "naturally with ပါတယ်။, တယ်။ or ပါဘူး။. Keep each numbered subtitle reasonably short "
+    "and easy to read in one or two lines; use concise natural wording without dropping the meaning. "
+    "Return only numbered lines and no headings.\n\n"
+)
+
+def build_subtitle_prompt_chunks(units, size=CHUNK):
+    total = (len(units) + size - 1) // size
+    out = []
+    for k in range(total):
+        lo, hi = k * size, min((k + 1) * size, len(units))
+        lines = "\n".join(f"[{i}] {units[i]['src']}" for i in range(lo, hi))
+        note = (f"PART {k + 1} of {total}. Translate only lines [{lo}] to [{hi - 1}]. "
+                "Keep the same numbers and output exactly one natural Burmese subtitle per line.\n\n")
+        out.append({"lo": lo, "hi": hi, "text": _SUBTITLE_MY_PROMPT + note + lines})
     return out
 
 def parse_numbered(text, n):
@@ -1561,29 +1690,6 @@ def detect_crop(src):
         return None
     return tuple(int(x) for x in m[-1])
 
-def prepare_video(src, dst, target_h, crop=True):
-    target_h = int(target_h) // 2 * 2
-    vf = None
-    if crop:
-        c = detect_crop(src)
-        cap = cv2.VideoCapture(src)
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        cap.release()
-        if c and c[1] < h * 0.95 and c[0] > 0 and c[1] > 0:
-            vf = f"crop={c[0]}:{c[1]}:{c[2]}:{c[3]},scale=-2:{target_h}"
-    if vf is None:
-        vf = f"scale=-2:{target_h}"
-    r = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-an", "-c:v", "libx264",
-                        "-preset", "ultrafast", "-crf", "24", "-pix_fmt", "yuv420p", dst],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError("video prepare မအောင်မြင်ပါ\n" + r.stderr[-800:])
-    cap = cv2.VideoCapture(dst)
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-    return W, H
-
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
     cv2.setNumThreads(1)
@@ -1595,26 +1701,26 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     cap.release()
 
     auto = detect_crop(src) if s.crop else None
-    # Ratio is intentionally fixed: always render a 9:16 vertical canvas.
-    target_aspect = ASPECTS["9:16"]
+    aspect = s.aspect if s.aspect in ASPECTS else "9:16"
     base_rect = resolve_crop(src_w, src_h, s, auto)
     render_rect = user_crop(base_rect, s)
-    W, H = out_size(render_rect, s.height, "9:16")
+    W, H = out_size(render_rect, s.height, aspect)
     # rawvideo/yuv420p encoders require positive even dimensions. Keep the
     # invariant here even if a crop detector returns unusual dimensions.
     W = max(2, int(W) // 2 * 2)
     H = max(2, int(H) // 2 * 2)
     rect = zoom_rect(render_rect, s.zoom)
-    # Fit any source ratio inside 9:16 and fill the unused area with blur.
-    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.08)
+    # Fit any source ratio inside the canvas and fill the unused area with blur.
+    blur_bg = needs_blur_bg(rect, aspect)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
     seg_len = mirror_every if mirror_every > 0 else 0.0
     fps_out = int(s.fps)
     nfr = max(1, int(round(total * fps_out)))
-    fs = max(16, int(W * s.sub_size / 100))
-    style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm"}
+    fs = sub_font_size(W, H, s.sub_size)
+    style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm",
+             "box": bool(s.sub_box)}
     # Neon border intentionally disabled for output video.
     neon = None
 
@@ -1936,89 +2042,77 @@ def split_video(src, out_prefix, seg_min=1.03, progress=None):
     return outs
 
 # ---- preview
-def _preview_clip(src, clip_path, height, crop):
-    if os.path.exists(clip_path) and os.path.getsize(clip_path) > 1000:
-        return clip_path
-    raw = clip_path + "_raw.mp4"
-    tmp = clip_path + "_tmp.mp4"
-    try:
-        for ss in (["-ss", "1"], []):
-            subprocess.run(["ffmpeg", "-y", *ss, "-i", src, "-t", f"{PREVIEW_SECS + 0.5:.1f}",
-                            "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-                            "-pix_fmt", "yuv420p", raw],
-                           capture_output=True, text=True)
-            if os.path.exists(raw) and os.path.getsize(raw) > 1000:
-                break
-        if not os.path.exists(raw) or os.path.getsize(raw) <= 1000:
-            raise RuntimeError("preview clip မရပါ")
-        prepare_video(raw, tmp, height, crop)
-        os.replace(tmp, clip_path)
-    finally:
-        for f in (raw, tmp):
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-    return clip_path
+_CROP_CACHE = {}
 
-def _preview_frame_at(src, cache_dir, height, crop, t):
-    key = f"pv_clip_{os.path.getsize(src)}_{int(height)}_{int(bool(crop))}.mp4"
-    clip = _preview_clip(src, os.path.join(cache_dir, key), height, crop)
-    cap = cv2.VideoCapture(clip)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-    idx = max(0, min(int(round(float(t) * fps)), n - 1))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-    ok, fr = cap.read()
-    if not ok:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+def _detect_crop_cached(src):
+    st = os.stat(src)
+    key = (os.path.abspath(src), st.st_size, st.st_mtime_ns)
+    if key not in _CROP_CACHE:
+        _CROP_CACHE[key] = detect_crop(src)
+    return _CROP_CACHE[key]
+
+def _preview_frame_at(src, height, crop, t):
+    """Seek straight to the wanted frame in the source (preview starts at 1s)."""
+    cap = cv2.VideoCapture(src)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+        start = fps if n > fps * 1.5 else 0
+        idx = max(0, min(int(round(start + float(t) * fps)), n - 1))
         fr = None
-        for _ in range(idx + 1):
-            ok2, f2 = cap.read()
-            if not ok2:
+        # the frame count can be slightly too high, so step back near the end
+        for i in (idx, idx - int(fps), 0):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, i))
+            ok, f = cap.read()
+            if ok:
+                fr = f
                 break
-            fr = f2
-    cap.release()
+    finally:
+        cap.release()
     if fr is None:
         raise RuntimeError("preview frame မရပါ")
-    return fr
+    src_h, src_w = fr.shape[:2]
+    auto = _detect_crop_cached(src) if crop else None
+    x, y, w, h = resolve_crop(src_w, src_h, Settings(crop=bool(crop)), auto)
+    fr = fr[y:y + h, x:x + w]
+    th = int(height) // 2 * 2
+    tw = max(2, int(round(fr.shape[1] * th / fr.shape[0] / 2)) * 2)
+    return cv2.resize(fr, (tw, th), interpolation=cv2.INTER_AREA)
 
-def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0):
-    cache_dir = os.path.dirname(os.path.abspath(out_png))
+def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0,
+                       show_part_label=True):
     t = max(0.0, min(float(t), PREVIEW_SECS))
-    base = _preview_frame_at(src, cache_dir, s.height or 720, s.crop, t)
+    base = _preview_frame_at(src, s.height or 720, s.crop, t)
     src_h, src_w = base.shape[:2]
     mirror = s.mirror_phase(t)
     rect = user_crop((0, 0, src_w, src_h), s)
-    target_aspect = ASPECTS["9:16"]
-    W, H = out_size(rect, s.height, "9:16")
-    # Preview should use the same 9:16 fit layout as the final render:
-    # keep the source fully visible and fill the upper/lower empty area with blur.
-    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.02)
-    fr = apply_view(base, rect, W, H, mirror, blur_bg=blur_bg)
-    fr = zoom_flip(fr, s.zoom, False)
+    aspect = s.aspect if s.aspect in ASPECTS else "9:16"
+    W, H = out_size(rect, s.height, aspect)
+    # Same layout as the final render: zoom the source, then fit it over blur.
+    rect = zoom_rect(rect, s.zoom)
+    fr = apply_view(base, rect, W, H, mirror, blur_bg=needs_blur_bg(rect, aspect))
     # Preview marker: match the final Part-N label style exactly:
     # gold text with a black outline, centered in the upper blur area.
-    label = "Part-1"
+    label = "Part-1" if show_part_label else ""
     label_scale = max(1.0, H / 420.0)
     label_th = max(2, int(round(H / 320.0)))
-    (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
-                                   label_scale, label_th)
-    lx = max(0, (W - tw) // 2)
-    ly = max(th + bl + 2, int(H * 0.16))
-    cv2.putText(fr, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
-                label_scale, (0, 0, 0), label_th + max(3, label_th // 2),
-                cv2.LINE_AA)
-    cv2.putText(fr, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
-                label_scale, (40, 214, 255), label_th, cv2.LINE_AA)
+    if label:
+        (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
+                                       label_scale, label_th)
+        lx = max(0, (W - tw) // 2)
+        ly = max(th + bl + 2, int(H * 0.16))
+        cv2.putText(fr, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                    label_scale, (0, 0, 0), label_th + max(3, label_th // 2),
+                    cv2.LINE_AA)
+        cv2.putText(fr, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                    label_scale, (40, 214, 255), label_th, cv2.LINE_AA)
     # Match final video subtitle: same glass box, gold Burmese text, and outline.
     if font_path and s.sub:
         preview_text = text or "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။"
         ov = build_overlay(preview_text, W, H, font_path,
-                           max(16, int(W * s.sub_size / 100)),
+                           sub_font_size(W, H, s.sub_size),
                            s.sub_pos, alpha=int(s.sub_alpha), color=GOLD,
-                           is_mm=is_mm)
+                           is_mm=is_mm, box=bool(s.sub_box))
         if ov:
             blend_overlay(fr, ov, (t / PREVIEW_SECS) if s.sub_sweep else None)
     cv2.imwrite(out_png, fr)
@@ -2089,15 +2183,19 @@ class Project:
 # ======================================================================
 # pipeline
 # ======================================================================
+_IMPORT_LOCKS = {}
+
 def init_project(path, source, height=0, cookies_file=None, progress=None):
-    proj = Project.create(path)
-    if os.path.exists(proj.video) and proj.data.get("source") == source:
-        log("• video ရှိပြီးသား၊ ပြန်မဆွဲတော့ဘူး")
-    else:
-        fetch_video(source, proj.video, height, progress, cookies_file)
-    proj.data["source"] = source
-    proj.save()
-    return proj
+    # Upload auto-fetch and a button press can overlap; never prepare the same file twice.
+    with _IMPORT_LOCKS.setdefault(os.path.abspath(path), threading.Lock()):
+        proj = Project.create(path)
+        if os.path.exists(proj.video) and proj.data.get("source") == source:
+            log("• video ရှိပြီးသား၊ ပြန်မဆွဲတော့ဘူး")
+        else:
+            fetch_video(source, proj.video, height, progress, cookies_file)
+        proj.data["source"] = source
+        proj.save()
+        return proj
 
 def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, lang="my",
                    progress=None):
@@ -2279,6 +2377,88 @@ def _build_subs(my_list, durs, lang):
             cur += dd
         t0 += durs[i]
     return subs
+
+def render_subtitles_original(proj, s, texts, progress=None):
+    """Burn translated subtitles onto the original video size and keep source audio."""
+    progress = progress or Progress()
+    src = proj.video
+    out = os.path.join(proj.path, "subtitle_only.mp4")
+    silent = os.path.join(proj.path, "subtitle_only_video.mp4")
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        raise RuntimeError("မူရင်း video ကို ဖွင့်မရပါ")
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    font = find_font(s.lang, s.font)
+    if not font:
+        cap.release()
+        raise RuntimeError("မြန်မာစာတန်းအတွက် font မတွေ့ပါ")
+    # Split long translated lines into short readable subtitle segments while
+    # preserving each source line's original time range.
+    subtitle_segments = []
+    for u, text in zip(proj.units, texts):
+        pieces = split_for_sub(text, mc=26, lang=s.lang) or [text]
+        total_chars = sum(len(x) for x in pieces) or 1
+        cur = float(u["start"])
+        duration = max(0.05, float(u["end"]) - cur)
+        for j, piece in enumerate(pieces):
+            seg_dur = duration * len(piece) / total_chars
+            subtitle_segments.append((cur, cur + seg_dur, piece))
+            cur += seg_dur
+    seg_i = 0
+    try:
+        proc = subprocess.Popen(
+            ["ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+             "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", f"{fps:.6f}",
+             "-i", "-", "-an", "-c:v", "libx264", "-preset", "veryfast",
+             "-crf", "18", "-pix_fmt", "yuv420p", silent],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        idx = 0
+        unit_i = 0
+        while True:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            t = idx / fps
+            while unit_i + 1 < len(proj.units) and t >= float(proj.units[unit_i]["end"]):
+                unit_i += 1
+            while seg_i + 1 < len(subtitle_segments) and t >= subtitle_segments[seg_i][1]:
+                seg_i += 1
+            if seg_i < len(subtitle_segments):
+                seg_start, seg_end, text = subtitle_segments[seg_i]
+                if seg_start <= t < seg_end and text.strip():
+                    fs = sub_font_size(W, H, s.sub_size)
+                    ov = build_overlay(text, W, H, font, fs, s.sub_pos,
+                                       alpha=int(s.sub_alpha), color=GOLD,
+                                       is_mm=LANG_CONF[s.lang]["is_mm"],
+                                       box=bool(s.sub_box))
+                    if ov:
+                        blend_overlay(fr, ov, None)
+            proc.stdin.write(fr.tobytes())
+            idx += 1
+            if idx % 10 == 0:
+                progress(min(idx / max(1, total_frames), 0.95),
+                         f"မြန်မာစာတန်းထိုးနေတယ် {idx}/{total_frames}")
+        proc.stdin.close()
+        err = proc.stderr.read().decode("utf-8", "replace")[-1200:]
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError("Subtitle video render မအောင်မြင်ပါ\n" + err)
+    finally:
+        cap.release()
+    # Reattach the original audio without changing its codec or volume.
+    sh(["ffmpeg", "-y", "-i", silent, "-i", src,
+        "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
+        "-shortest", "-movflags", "+faststart", out])
+    try:
+        os.remove(silent)
+    except OSError:
+        pass
+    progress(1.0, "မြန်မာစာတန်းပြီးပြီ")
+    return {"final": out, "new_dur": proj.data["vdur"],
+            "old_dur": proj.data["vdur"], "timings": {"subtitle_only": True}}
 
 def run_render(proj, s, proxy=None, progress=None):
     progress = progress or Progress()
@@ -2576,25 +2756,98 @@ def launch_ui():
             return ""
         return f if isinstance(f, str) else getattr(f, "name", "")
 
+    def _cookies_path(text):
+        text = (text or "").strip()
+        if not text:
+            return None
+        # Accept both the normal Netscape export and the JSON format produced
+        # by several mobile/browser cookie extensions.  Some exporters omit
+        # the Netscape header, so restore it when the rows are valid.
+        raw = text.lstrip("\ufeff")
+        if raw.startswith("[") or raw.startswith("{"):
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    data = data.get("cookies", data.get("items", []))
+                rows = []
+                for c in data if isinstance(data, list) else []:
+                    if not isinstance(c, dict) or not c.get("name"):
+                        continue
+                    domain = str(c.get("domain") or ".youtube.com")
+                    include = "TRUE" if domain.startswith(".") else "FALSE"
+                    path = str(c.get("path") or "/")
+                    secure = "TRUE" if c.get("secure") else "FALSE"
+                    exp = c.get("expirationDate", c.get("expires", 0))
+                    try:
+                        exp = int(float(exp)) if float(exp) > 0 else 0
+                    except Exception:
+                        exp = 0
+                    rows.append("\t".join((domain, include, path, secure, str(exp),
+                                           str(c.get("name", "")), str(c.get("value", "")))))
+                if not rows:
+                    raise ValueError("JSON ထဲမှာ cookie row မတွေ့ပါ")
+                raw = "# Netscape HTTP Cookie File\n" + "\n".join(rows)
+            except Exception as ex:
+                raise ValueError("Cookies JSON format မမှန်ပါ: " + str(ex)[:180])
+        else:
+            lines = raw.splitlines()
+            valid_rows = [ln for ln in lines
+                          if ln.strip() and not ln.lstrip().startswith("#")
+                          and len(ln.split("\t")) >= 7]
+            if valid_rows and not raw.lower().startswith("# netscape"):
+                raw = "# Netscape HTTP Cookie File\n" + raw
+            elif not valid_rows:
+                # Also accept the one-line Cookie request-header form copied
+                # from browser DevTools: name=value; name2=value2.  A header
+                # has no domain metadata, so place it on both domains used by
+                # YouTube authentication.
+                pairs = []
+                for item in raw.replace("\r", " ").replace("\n", " ").split(";"):
+                    item = item.strip()
+                    if "=" not in item:
+                        continue
+                    name, value = item.split("=", 1)
+                    name, value = name.strip(), value.strip()
+                    if name and value:
+                        pairs.append((name, value))
+                if not pairs:
+                    raise ValueError(
+                        "Cookies format မမှန်ပါ။ Netscape cookies.txt၊ browser JSON export သို့မဟုတ် name=value; name2=value2 ပုံစံကို paste လုပ်ပါ")
+                rows = []
+                for domain in (".youtube.com", ".google.com"):
+                    for name, value in pairs:
+                        rows.append("\t".join((domain, "TRUE", "/", "TRUE", "0",
+                                               name, value)))
+                raw = "# Netscape HTTP Cookie File\n" + "\n".join(rows)
+        path = os.path.join(BASE, "yt_cookies.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(raw.rstrip("\n") + "\n")
+        return path
+
     def _source(url):
         return extract_url(url or "")
+
+    def _quality_height(value):
+        return {"720p": 720, "1080p": 1080, "မူရင်း HD": 0}.get(str(value), 720)
 
     def _pbar(frac, width=20):
         frac = max(0.0, min(float(frac), 1.0))
         fill = int(width * frac)
         return "█" * fill + "░" * (width - fill)
 
-    def _ensure_video(url, height, cb):
+    def _ensure_video(url, height, cb, cookies=None):
         source = _source(url)
         if not source:
-            raise gr.Error("Video link ထည့်ပါ")
-        dl_h = int(height) or 1080
+            raise gr.Error("Video link ထည့်ပါ၊ ဒါမှမဟုတ် Video ဖိုင် Upload လုပ်ပါ")
+        # height=0 means Original HD: no yt-dlp height cap.
+        dl_h = int(height)
         key = source + f"|{dl_h}"
         if os.path.isfile(source):
             key += f"|{os.path.getsize(source)}"
         pdir = os.path.join(BASE, hashlib.md5(key.encode()).hexdigest()[:10])
         dl_prog = Progress(0.0, 1.0, parent=lambda f, l=None: cb(f, "Video ယူနေတယ်..."))
-        proj = init_project(pdir, source, dl_h, os.environ.get("YT_COOKIES"), dl_prog)
+        proj = init_project(pdir, source, dl_h,
+                            cookies or os.environ.get("YT_COOKIES"), dl_prog)
         return pdir, proj
 
     dark_head = """
@@ -2632,9 +2885,11 @@ def launch_ui():
 
     FETCH = {}
 
-    def start_fetch(url, height):
-        if not _source(url):
-            raise gr.Error("Video link ထည့်ပါ")
+    def start_fetch(url, upload, quality):
+        height = _quality_height(quality)
+        source = _source(_path(upload) or url)
+        if not source:
+            raise gr.Error("Video link ထည့်ပါ၊ ဒါမှမဟုတ် Video ဖိုင် Upload လုပ်ပါ")
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "Video ယူနေတယ်...", "res": None, "err": None,
               "done": False, "t0": time.time()}
@@ -2647,7 +2902,7 @@ def launch_ui():
 
         def work():
             try:
-                st["res"] = _ensure_video(url, height, cb)
+                st["res"] = _ensure_video(source, height, cb)
             except BaseException as ex:
                 st["err"] = ex
             finally:
@@ -2657,7 +2912,7 @@ def launch_ui():
         return jid, "⏳ စတင်နေတယ်...", gr.Timer(active=True)
 
     def _preview(pdir, lang_name, height, aspect, zoom, crop, flip, sub, sub_size,
-                 sub_pos, sweep, cl, cr, ct, cb, pv_t, strict):
+                 sub_pos, sweep, cl, cr, ct, cb, pv_t, part_label, strict):
         if not pdir or not os.path.exists(os.path.join(pdir, "src.mp4")):
             if strict:
                 raise gr.Error("Video link ထည့်ပြီး ⬇️ အရင်နှိပ်ပါ")
@@ -2681,7 +2936,8 @@ def launch_ui():
                     pass
             out = os.path.join(pdir, f"preview_{int(time.time() * 1000)}.png")
             make_preview_frame(proj.video, out, s, LANG_CONF[code]["sample"], font,
-                               LANG_CONF[code]["is_mm"], float(pv_t or 0.0))
+                               LANG_CONF[code]["is_mm"], float(pv_t or 0.0),
+                               bool(part_label))
             return out
         except Exception as ex:
             log(f"preview error: {ex}")
@@ -2730,10 +2986,12 @@ def launch_ui():
 
     TRANS = {}
 
-    def start_step1(url, lang_name, model, src_lang, max_min, height):
-        if not _source(url):
-            raise gr.Error("Video link ထည့်ပါ")
-        code = LANGS[lang_name]
+    def start_step1(url, upload, mode, lang_name, model, src_lang, max_min, quality):
+        height = _quality_height(quality)
+        source = _source(_path(upload) or url)
+        if not source:
+            raise gr.Error("Video link ထည့်ပါ၊ ဒါမှမဟုတ် Video ဖိုင် Upload လုပ်ပါ")
+        code = "my" if mode == "မြန်မာစာတန်းသီးသန့်" else LANGS[lang_name]
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "စတင်နေတယ်...", "res": None, "err": None,
               "done": False, "t0": time.time()}
@@ -2747,10 +3005,14 @@ def launch_ui():
         def work():
             try:
                 cb(0.0, "Video ယူနေတယ်...")
-                pdir, proj = _ensure_video(url, height, lambda f, l=None: cb(f * 0.2, l))
+                pdir, proj = _ensure_video(source, height,
+                                           lambda f, l=None: cb(f * 0.2, l))
                 tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
                 info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
-                st["res"] = (pdir, info, build_prompt_chunks(proj.units, code))
+                chunks = (build_subtitle_prompt_chunks(proj.units)
+                          if mode == "မြန်မာစာတန်းသီးသန့်"
+                          else build_prompt_chunks(proj.units, code))
+                st["res"] = (pdir, info, chunks)
             except BaseException as ex:
                 st["err"] = ex
             finally:
@@ -2780,15 +3042,15 @@ def launch_ui():
         return (pdir, f"✅ 100% · {info} · Prompt {len(chunks)} ပိုင်း · {elapsed:.0f}s",
                 chunks, {}, gr.Timer(active=False), gr.update(interactive=True))
 
-    def step2(pdir, translated, parts, lang_name, voice, rate, workers,
+    def step2(pdir, translated, parts, mode, lang_name, voice, rate, workers,
               bgm_file, bgm_vol, voice_db, duck,
               height, aspect, fps, preset, max_speed, crop, flip, zoom,
-              sub, sub_size, sub_pos, sweep, punch,
+              sub, blur_box, sub_size, sub_pos, sweep, punch, part_labels,
               crop_l, crop_r, crop_t, crop_b,
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
-        code = LANGS[lang_name]
+        code = "my" if mode == "မြန်မာစာတန်းသီးသန့်" else LANGS[lang_name]
         try:
             proj = Project.load(pdir)
             if not proj.units:
@@ -2815,7 +3077,9 @@ def launch_ui():
             s.split_min = 1.03          # 1.03 min per part
 
             s.sub, s.sub_size, s.sub_pos = bool(sub), float(sub_size), int(sub_pos)
+            s.sub_box = bool(blur_box)
             s.sub_sweep = bool(sweep)
+            s.part_label = bool(part_labels)
             s.punch = False
             s.punch_every, s.punch_hold, s.punch_zoom = 3.0, 0.5, 1.15
             # Neon border disabled
@@ -2832,32 +3096,44 @@ def launch_ui():
                     pass
 
             prog = Progress(0.0, 1.0, parent=_cb(progress))
-            res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None, prog)
+            if mode == "မြန်မာစာတန်းသီးသန့်":
+                # Preserve original resolution/audio; only burn the translated subtitles.
+                s.sub = True
+                s.crop = False
+                s.flip = False
+                s.zoom = 1.0
+                res = render_subtitles_original(proj, s, [u["my"] for u in proj.units], prog)
+                files = [res["final"]]
+                out = res["final"]
+                split_note = ""
+            else:
+                res = run_render(proj, s, os.environ.get("EDGE_TTS_PROXY") or None, prog)
 
-            # auto split
-            out = os.path.join(pdir, f"final_{code}_{int(time.time())}.mp4")
-            shutil.copy(res["final"], out)
-            files = [out]
-            split_note = ""
-            if s.split and s.split_min > 0:
-                # Split first, then label each part independently so Part-1 can
-                # never spill into the beginning of Part-2.
-                parts_out = split_video(out, os.path.splitext(out)[0], s.split_min)
-                if len(parts_out) > 1:
-                    labeled_parts = []
-                    for part_no, part_path in enumerate(parts_out, 1):
-                        label_tmp = part_path + ".label.mp4"
-                        add_part_label(part_path, label_tmp, part_no)
-                        os.replace(label_tmp, part_path)
-                        labeled_parts.append(part_path)
-                    parts_out = labeled_parts
-                    files = parts_out
-                    durs = [probe_duration(p) for p in parts_out]
-                    split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း: "
-                                  + " · ".join(f"P{k + 1} {fmt_t(d)}" for k, d in enumerate(durs)))
-                else:
-                    split_note = (f"\n\n✂️ {2 * s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ "
-                                  f"(ခွဲမယ့် အပိုင်းက {s.split_min:g} မိနစ်စီ)")
+                # auto split
+                out = os.path.join(pdir, f"final_{code}_{int(time.time())}.mp4")
+                shutil.copy(res["final"], out)
+                files = [out]
+                split_note = ""
+                if s.split and s.split_min > 0:
+                    # Split first, then label each part independently so Part-1 can never spill into Part-2.
+                    parts_out = split_video(out, os.path.splitext(out)[0], s.split_min)
+                    if len(parts_out) > 1:
+                        labeled_parts = []
+                        for part_no, part_path in enumerate(parts_out, 1):
+                            if part_labels:
+                                label_tmp = part_path + ".label.mp4"
+                                add_part_label(part_path, label_tmp, part_no)
+                                os.replace(label_tmp, part_path)
+                            labeled_parts.append(part_path)
+                        parts_out = labeled_parts
+                        files = parts_out
+                        durs = [probe_duration(p) for p in parts_out]
+                        split_note = (f"\n\n✂️ {len(parts_out)} ပိုင်း: "
+                                      + " · ".join(f"P{k + 1} {fmt_t(d)}" for k, d in enumerate(durs)))
+                    else:
+                        split_note = (f"\n\n✂️ {2 * s.split_min:g} မိနစ်ထက် မရှည်လို့ မခွဲပါ "
+                                      f"(ခွဲမယ့် အပိုင်းက {s.split_min:g} မိနစ်စီ)")
+
         except gr.Error:
             raise
         except Exception as ex:
@@ -2865,14 +3141,14 @@ def launch_ui():
 
         # Keep the main result full length; show Part-N labels across its timeline.
         display_out = out
-        if len(files) > 1:
+        if len(files) > 1 and part_labels:
             full_label_tmp = out + ".full_label.mp4"
             add_full_part_labels(out, full_label_tmp, s.split_min)
             display_out = full_label_tmp
         mb = os.path.getsize(display_out) / 1e6
         return (display_out, files,
                 f"✅ ပြီးပြီ · {res['new_dur']:.1f}s (မူရင်း {res['old_dur']:.1f}s) · {mb:.1f} MB"
-                + split_note)
+                + split_note, display_out)
 
     def reset_all(pdir):
         if pdir and os.path.isdir(pdir) and os.path.abspath(pdir).startswith(BASE):
@@ -2882,7 +3158,7 @@ def launch_ui():
         # stayed visible even though the project state had been deleted.
         return ("", "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး",
                 "", "", gr.Timer(active=False), gr.Timer(active=False),
-                gr.update(interactive=True), "")
+                gr.update(interactive=True), "", None)
 
     def make_setter(lo, hi):
         def f(text, parts):
@@ -2937,7 +3213,12 @@ def launch_ui():
                     f"Whisper → Gemini → TTS (Edge / Nara offline) → Smart Sync → စာတန်း · Mirror=5s · Render=4 · Split=1.03min")
         pdir_state = gr.State("")
         height = gr.State(720)
-        aspect = gr.State("9:16")
+        quality = gr.Radio(["720p", "1080p", "မူရင်း HD"], value="720p",
+                           label="Video Quality (မူရင်း HD = resolution မကန့်သတ်)")
+        mode = gr.Radio(["Recap", "မြန်မာစာတန်းသီးသန့်"], value="Recap",
+                        label="Output Mode (Default: Recap)")
+        aspect = gr.Radio([("9:16 (TikTok / Shorts)", "9:16"), ("16:9 (YouTube)", "16:9")],
+                          value="9:16", label="Video Ratio (Recap mode)")
         fps = gr.State(24)
         preset = gr.State("ultrafast")
         crop = gr.State(True)
@@ -2965,7 +3246,11 @@ def launch_ui():
         gr.Markdown("### 📥 Video")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
                          placeholder="https://...")
-        b_fetch = gr.Button("⬇️ Video ဆွဲ + Preview")
+        # gr.File: no browser playback and no server-side MP4 conversion on upload.
+        video_upload = gr.File(label="ဒါမှမဟုတ် Video ဖိုင် Upload လုပ်ပါ",
+                               file_types=["video", ".mp4", ".mov", ".mkv", ".webm", ".avi"],
+                               type="filepath")
+        b_fetch = gr.Button("⬇️ Video ဆွဲ / Upload + Preview")
         status_fetch = gr.Markdown()
 
         gr.Markdown("### 🎨 Preview")
@@ -2984,6 +3269,7 @@ def launch_ui():
         with gr.Accordion("🎛️ စာတန်း", open=False):
             with gr.Row():
                 sub = gr.Checkbox(True, label="စာတန်း")
+                blur_box = gr.Checkbox(True, label="Blur box")
                 sweep = gr.Checkbox(True, label="🎵 Music sweep")
                 flip = gr.Checkbox(True, label="Mirror")
                 punch = gr.State(False)
@@ -2991,17 +3277,20 @@ def launch_ui():
             sub_pos = gr.Slider(0, 100, value=90, step=1, label="စာတန်း နေရာ (0=အပေါ် 100=အောက်)")
             zoom = gr.Slider(1.0, 1.25, value=1.0, step=0.01, label="Zoom")
 
+        part_labels = gr.Checkbox(True, label="Part စာတန်း ပြရန်")
         pv_in = [pdir_state, lang, height, aspect, zoom, crop, flip, sub, sub_size, sub_pos,
-                 sweep, crop_l, crop_r, crop_t, crop_b, pv_t]
+                 sweep, crop_l, crop_r, crop_t, crop_b, pv_t, part_labels]
         # Subtitle position is controlled by the visible slider below.
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
-        for trig in (url.submit, b_fetch.click):
-            trig(start_fetch, [url, height], [fetch_job, status_fetch, fetch_timer])
+        quality.change(lambda q: _quality_height(q), quality, height)
+        for trig in (url.submit, b_fetch.click, video_upload.upload):
+            trig(start_fetch, [url, video_upload, quality],
+                 [fetch_job, status_fetch, fetch_timer])
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang,
+        for c in (aspect, sub_size, sub_pos, zoom, sub, sweep, flip, lang,
                   crop_l, crop_r, crop_t, crop_b, pv_t):
             c.change(preview_auto, pv_in, pv_img,
                      trigger_mode="always_last", show_progress="hidden", queue=True)
@@ -3030,11 +3319,15 @@ def launch_ui():
                         st = gr.Markdown("⏳ မဖြည့်သေး")
                         box.change(make_setter(c["lo"], c["hi"]), [box, parts_state], [parts_state, st])
 
-        gr.Markdown("### 2️⃣ အသံထုတ် + Video")
+        gr.Markdown("### 2️⃣ Output")
         b2 = gr.Button("2️⃣ အသံထုတ် + Video ပေါင်း", variant="primary")
         status2 = gr.Markdown()
         video = gr.Video(label="ရလဒ်", autoplay=True)
         dl = gr.File(label="⬇️ Download MP4 (အပိုင်းခွဲ ဖိုင်များ)", file_count="multiple")
+        if hasattr(gr, "DownloadButton"):
+            final_download = gr.DownloadButton("⬇️ Final video တိုက်ရိုက် Download")
+        else:
+            final_download = gr.File(label="⬇️ Final video တိုက်ရိုက် Download", file_count="single")
         gr.Markdown("### #️⃣ နောက်ဆုံး Gemini Part ထဲက Hashtag ၅ ခု")
         hashtag_btn = gr.Button("#️⃣ AI ထုတ်ပေးထားတဲ့ Hashtag တွေပြရန်")
         hashtag_output = gr.Textbox(
@@ -3046,23 +3339,23 @@ def launch_ui():
         hashtag_btn.click(extract_hashtags_from_parts, [parts_state, translated, lang], hashtag_output)
         b3 = gr.Button("🗑️ အသစ်ပြန်စ")
 
-        b1.click(start_step1, [url, lang, model, src_lang, max_min, height],
+        b1.click(start_step1, [url, video_upload, mode, lang, model, src_lang, max_min, quality],
                  [trans_job, status1, trans_timer, b1, pdir_state, chunks_state,
                   parts_state, translated, video, dl, status2, hashtag_output])
         trans_timer.tick(poll_step1, trans_job,
                          [pdir_state, status1, chunks_state, parts_state, trans_timer, b1],
                          show_progress="hidden")
-        render_inputs = [pdir_state, translated, parts_state, lang, voice, rate, workers,
+        render_inputs = [pdir_state, translated, parts_state, mode, lang, voice, rate, workers,
                          bgm_file, bgm_vol, voice_db, duck,
                          height, aspect, fps, preset, max_speed, crop, flip, zoom,
-                         sub, sub_size, sub_pos, sweep, punch,
+                         sub, blur_box, sub_size, sub_pos, sweep, punch, part_labels,
                          crop_l, crop_r, crop_t, crop_b]
         b2.click(render_started, None, status2, queue=False).then(
-            step2, render_inputs, [video, dl, status2])
+            step2, render_inputs, [video, dl, status2, final_download])
         b3.click(reset_all, pdir_state,
                  [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
                   pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1,
-                  hashtag_output])
+                  hashtag_output, video_upload])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
