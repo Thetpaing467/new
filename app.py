@@ -1256,6 +1256,7 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
             if tot:
                 progress(d.get("downloaded_bytes", 0) / tot)
 
+    # height=0 (original HD) remains available in the UI.
     fmt = (f"bv*[height<={height}][vcodec^=avc1]+ba[ext=m4a]/"
            f"b[height<={height}][vcodec^=avc1]/"
            f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b"
@@ -1267,7 +1268,6 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
         "noplaylist": True, "quiet": True, "no_warnings": True,
         "retries": 5, "fragment_retries": 5, "concurrent_fragment_downloads": 4,
         "progress_hooks": [hook],
-        "extractor_args": {"youtube": {"player_client": ["tv", "ios", "web"]}},
     }
     if cookies_file and os.path.exists(cookies_file):
         opts["cookiefile"] = cookies_file
@@ -1279,69 +1279,32 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
         raise RuntimeError("yt-dlp ဖိုင် မထွက်ပါ")
     return max(files, key=os.path.getsize)
 
-def _cv2_readable(path):
-    cap = cv2.VideoCapture(path)
-    try:
-        ok, _ = cap.read()
-        return bool(ok)
-    finally:
-        cap.release()
-
 def ensure_mp4(raw, final, height):
-    """Repair malformed audio while avoiding unnecessary video re-encoding.
-
-    H.264 / HEVC up to 1080p is stream-copied (the renderer scales to the output
-    size anyway). Only other codecs or larger videos are transcoded.
-    """
     try:
-        info = json.loads(sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                              "-show_entries", "stream=codec_name,width,height",
-                              "-of", "json", raw]))["streams"][0]
-        codec = info.get("codec_name", "")
-        short = min(int(info.get("width") or 0), int(info.get("height") or 0))
+        codec = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_name", "-of", "csv=p=0", raw]).strip()
     except Exception:
-        codec, short = "", 0
+        codec = ""
     if not codec:
         raise RuntimeError("Video stream မတွေ့ပါ")
+    if codec == "h264":
+        try:
+            sh(["ffmpeg", "-y", "-i", raw, "-c", "copy", "-movflags", "+faststart", final])
+            return final
+        except Exception:
+            pass
     height = int(height)
-    limit = max(height, 1080) if height > 0 else 0      # short side; 0 = no limit
-    can_copy = codec in ("h264", "hevc") and (not limit or 0 < short <= limit)
-    # shrink only the short side, so portrait and landscape are treated alike
-    scale = (f"scale=w='if(gt(iw,ih),-2,min(iw,{limit}))':"
-             f"h='if(gt(iw,ih),min(ih,{limit}),-2)'," if limit else "")
-    transcode = ["-vf", scale + "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-                 "-pix_fmt", "yuv420p"]
-    tmp = final + ".tmp.mp4"
-    attempts = ([["-c:v", "copy"]] if can_copy else []) + [transcode]
-    last = ""
-    try:
-        for vopts in attempts:
-            cmd = ["ffmpeg", "-y", "-loglevel", "error",
-                   "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
-                   "-i", raw, "-map", "0:v:0", "-map", "0:a:0?", *vopts,
-                   "-c:a", "aac", "-aac_coder", "fast", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-                   "-movflags", "+faststart", tmp]
-            try:
-                sh(cmd)
-                if not _cv2_readable(tmp):
-                    raise RuntimeError("video frame ဖတ်မရပါ")
-                os.replace(tmp, final)
-                return final
-            except Exception as ex:
-                last = str(ex)
-        raise RuntimeError("Video/AAC ကို ပြန်ပြင်မရပါ။ " + last[-500:])
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    vf = ["-vf", f"scale=-2:'min(ih,{height})'"] if height > 0 else []
+    sh(["ffmpeg", "-y", "-i", raw, *vf,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", final])
+    return final
 
 def fetch_video(source, final, height=0, progress=None, cookies_file=None):
     source = extract_url(source)
     if not re.match(r"^https?://", source, re.I):
         if not os.path.isfile(source):
             raise FileNotFoundError(f"ဖိုင် မတွေ့ပါ: {source}")
-        if progress:
-            progress(1.0)
         ensure_mp4(source, final, height)
         return final
     work = tempfile.mkdtemp(prefix="dl_")
