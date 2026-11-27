@@ -9,17 +9,15 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-try:
-    import spaces
-
-    @spaces.GPU
-    def _gpu_placeholder():
-        return 0
-except ImportError:
-    pass  # Not needed outside Hugging Face Spaces.
+import spaces
 
 
-__version__ = "1.28.0"
+@spaces.GPU
+def _gpu_placeholder():
+    return 0
+
+
+__version__ = "1.27.4"
 
 import argparse
 import asyncio
@@ -1066,10 +1064,6 @@ def apply_view(fr, rect, W, H, mirror, interp=cv2.INTER_LINEAR, blur_bg=False):
 def out_size(rect, height, aspect="free"):
     ratio = ASPECTS.get(aspect) if aspect in ASPECTS else None
     if int(height) <= 0:
-        if aspect == "16:9":
-            # Original HD: use the long side, so a portrait source still gives full HD.
-            W = max(2, int(max(rect[2], rect[3])) // 2 * 2)
-            return W, max(2, int(round(W / ratio / 2)) * 2)
         if ratio:
             W = max(2, int(rect[2]) // 2 * 2)
             H = max(2, int(round(W / ratio / 2)) * 2)
@@ -1082,18 +1076,6 @@ def out_size(rect, height, aspect="free"):
     else:
         W = int(round(rect[2] * H / max(1, rect[3]) / 2)) * 2
     return max(2, W), H
-
-def needs_blur_bg(rect, aspect):
-    """True when the source shape differs enough from the canvas to fit it over blur."""
-    target = ASPECTS.get(aspect)
-    if not target:
-        return False
-    return abs((rect[2] / max(1, rect[3])) / target - 1.0) > 0.08
-
-def sub_font_size(W, H, pct):
-    # Portrait: % of width. Landscape: scale from height so text is not oversized.
-    base = W if W <= H else H * 0.75
-    return max(16, int(base * pct / 100))
 
 def user_crop(rect, s):
     x, y, w, h = rect
@@ -1256,7 +1238,6 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
             if tot:
                 progress(d.get("downloaded_bytes", 0) / tot)
 
-    # height=0 (original HD) remains available in the UI.
     fmt = (f"bv*[height<={height}][vcodec^=avc1]+ba[ext=m4a]/"
            f"b[height<={height}][vcodec^=avc1]/"
            f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b"
@@ -1268,6 +1249,7 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
         "noplaylist": True, "quiet": True, "no_warnings": True,
         "retries": 5, "fragment_retries": 5, "concurrent_fragment_downloads": 4,
         "progress_hooks": [hook],
+        "extractor_args": {"youtube": {"player_client": ["tv", "ios", "web"]}},
     }
     if cookies_file and os.path.exists(cookies_file):
         opts["cookiefile"] = cookies_file
@@ -1280,24 +1262,31 @@ def _dl_ytdlp(url, out_noext, height, progress=None, cookies_file=None):
     return max(files, key=os.path.getsize)
 
 def ensure_mp4(raw, final, height):
+    """Repair malformed audio while avoiding unnecessary video re-encoding."""
     try:
         codec = sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
                     "-show_entries", "stream=codec_name", "-of", "csv=p=0", raw]).strip()
+        vh = int(sh(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                     "-show_entries", "stream=height", "-of", "csv=p=0", raw]).strip())
     except Exception:
-        codec = ""
+        codec, vh = "", 0
     if not codec:
         raise RuntimeError("Video stream မတွေ့ပါ")
-    if codec == "h264":
-        try:
-            sh(["ffmpeg", "-y", "-i", raw, "-c", "copy", "-movflags", "+faststart", final])
-            return final
-        except Exception:
-            pass
-    height = int(height)
-    vf = ["-vf", f"scale=-2:'min(ih,{height})'"] if height > 0 else []
-    sh(["ffmpeg", "-y", "-i", raw, *vf,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", final])
+    target = int(height) if int(height) > 0 else (vh or 1080)
+    if codec == "h264" and (int(height) <= 0 or (vh and vh <= target)):
+        vopts = ["-c:v", "copy"]
+    else:
+        vopts = ["-vf", f"scale=-2:'min(ih,{target})'",
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                 "-pix_fmt", "yuv420p"]
+    cmd = ["ffmpeg", "-y", "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
+           "-i", raw, "-map", "0:v:0", "-map", "0:a:0?", *vopts,
+           "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+           "-movflags", "+faststart", final]
+    try:
+        sh(cmd)
+    except Exception as ex:
+        raise RuntimeError("Video/AAC ကို ပြန်ပြင်မရပါ။ " + str(ex)[-500:])
     return final
 
 def fetch_video(source, final, height=0, progress=None, cookies_file=None):
@@ -1471,18 +1460,41 @@ def build_prompt_chunks(units, lang="my", size=CHUNK):
     return out
 
 _SUBTITLE_MY_PROMPT = (
-    "You are a native Burmese subtitle translator. Translate every numbered source line into "
-    "natural, easy-to-understand spoken Burmese for Myanmar viewers. This is a subtitle translation, "
-    "not a movie recap and not a word-for-word machine translation. Preserve the exact meaning, "
-    "emotion, names, relationships and cause-and-effect in the source. Rewrite idioms naturally "
-    "so a Burmese viewer understands them immediately. Use short, readable subtitle sentences "
-    "that sound like a real person speaking, not a robot, textbook or formal essay. Do not add "
-    "facts, explanations, hooks or commentary that are not in the source. Do not use quotation marks. "
-    "Use Myanmar Unicode only. Keep exactly one output line for every input number, in the same "
-    "order and with the same numbers. Never skip, merge or invent a line. Most lines should end "
-    "naturally with ပါတယ်။, တယ်။ or ပါဘူး။. Keep each numbered subtitle reasonably short "
-    "and easy to read in one or two lines; use concise natural wording without dropping the meaning. "
-    "Return only numbered lines and no headings.\n\n"
+    "You are a native Myanmar Burmese dialogue writer and subtitle adapter. Read ALL the numbered "
+    "source lines first and understand the complete conversation, including who is speaking, who is "
+    "being challenged, whether a line is a question, answer, interruption, joke, insult, agreement "
+    "or explanation. Then rewrite each line as the way real Burmese people would naturally say it "
+    "in an actual interview or conversation. This is NOT a literal translation exercise and NOT a "
+    "formal written translation. Do not translate word by word. First understand the meaning, tone "
+    "and speaker relationship, then say the same thing in fluent everyday spoken Burmese.\n\n"
+    "NATURAL SPOKEN BURMESE: use relaxed Myanmar Unicode that sounds good when read aloud. Use "
+    "normal conversational particles and endings when they fit the speaker and situation, such as "
+    "တော့၊ လေ၊ ပေါ့၊ ပါ၊ တယ်၊ ပါတယ်၊ ပါဘူး၊ ဟုတ်တယ်၊ အင်း၊ ဒါဆို၊ ခင်ဗျား and ကျွန်တော်. Do not "
+    "force every line to end with ပါတယ်။, တယ်။ or ပါဘူး။. Let questions sound like real questions, "
+    "answers sound like answers, and interruptions or sharp replies remain sharp. Keep the natural "
+    "rhythm of spoken Burmese instead of making every line a complete textbook sentence. Use commas "
+    "and short pauses where a person would actually breathe.\n\n"
+    "CONVERSATION CONTEXT: connect the meaning across neighboring lines, but keep every numbered "
+    "line as its own subtitle. Preserve the back-and-forth speaker turns, implied subject, emphasis, "
+    "sarcasm, humour, disagreement and emotion. If the source repeats a phrase for emphasis, keep "
+    "the repetition naturally. Do not turn the conversation into narration or a movie recap. Do not "
+    "summarize, explain, beautify, soften or rewrite it as an essay.\n\n"
+    "AVOID ROBOTIC OR FORMAL WORDING: do not use stiff textbook endings or literary words such as "
+    "၏၊ သည်၊ ထို၊ ၎င်း၊ အဆိုပါ၊ ဖြစ်ပါသည်၊ ထို့ကြောင့် or အကြောင်းအရာပေါ်မူတည်၍ unless the "
+    "source genuinely requires them. Prefer the direct, easy wording people use in everyday speech. "
+    "Do not use unnatural word-for-word structures copied from English or Chinese. Do not make every "
+    "line polite if the speaker is angry, sarcastic or casual. Keep the original level of politeness "
+    "and attitude.\n\n"
+    "MEANING AND SAFETY: preserve the exact meaning, facts, names, numbers, relationships and "
+    "speaker intent. Do not add facts, explanations, hooks, opinions or commentary that are not in "
+    "the source. Do not remove important meaning. Rewrite idioms into the closest natural Burmese "
+    "expression rather than translating them literally. Use Myanmar Unicode only. Do not use "
+    "quotation marks, English or Chinese text unless it is a necessary name or term from the source.\n\n"
+    "SUBTITLE READABILITY: keep each subtitle concise and easy to read in one or two lines, but do "
+    "not shorten it so much that the meaning changes. Split a long thought naturally with pauses, "
+    "not in the middle of a name or phrase. Return exactly one output line for every input number, "
+    "in the same order and with the same numbers. Never skip, merge, reorder or invent a line. "
+    "Return only numbered subtitle lines and no headings or explanations.\n\n"
 )
 
 def build_subtitle_prompt_chunks(units, size=CHUNK):
@@ -1491,8 +1503,9 @@ def build_subtitle_prompt_chunks(units, size=CHUNK):
     for k in range(total):
         lo, hi = k * size, min((k + 1) * size, len(units))
         lines = "\n".join(f"[{i}] {units[i]['src']}" for i in range(lo, hi))
-        note = (f"PART {k + 1} of {total}. Translate only lines [{lo}] to [{hi - 1}]. "
-                "Keep the same numbers and output exactly one natural Burmese subtitle per line.\n\n")
+        note = (f"PART {k + 1} of {total}. Rewrite only lines [{lo}] to [{hi - 1}] after "
+                "understanding the conversation context. Keep the same numbers and output exactly "
+                "one natural spoken Burmese subtitle per line.\n\n")
         out.append({"lo": lo, "hi": hi, "text": _SUBTITLE_MY_PROMPT + note + lines})
     return out
 
@@ -1655,6 +1668,34 @@ def detect_crop(src):
         return None
     return tuple(int(x) for x in m[-1])
 
+def prepare_video(src, dst, target_h, crop=True):
+    target_h = int(target_h)
+    if target_h <= 0:
+        cap0 = cv2.VideoCapture(src)
+        target_h = int(cap0.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+        cap0.release()
+    target_h = target_h // 2 * 2
+    vf = None
+    if crop:
+        c = detect_crop(src)
+        cap = cv2.VideoCapture(src)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        if c and c[1] < h * 0.95 and c[0] > 0 and c[1] > 0:
+            vf = f"crop={c[0]}:{c[1]}:{c[2]}:{c[3]},scale=-2:{target_h}"
+    if vf is None:
+        vf = f"scale=-2:{target_h}"
+    r = subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-an", "-c:v", "libx264",
+                        "-preset", "ultrafast", "-crf", "24", "-pix_fmt", "yuv420p", dst],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("video prepare မအောင်မြင်ပါ\n" + r.stderr[-800:])
+    cap = cv2.VideoCapture(dst)
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return W, H
+
 def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
                  progress=None):
     cv2.setNumThreads(1)
@@ -1666,24 +1707,25 @@ def render_final(src, audio, out, plan, total, s, subs, font_path, is_mm=True,
     cap.release()
 
     auto = detect_crop(src) if s.crop else None
-    aspect = s.aspect if s.aspect in ASPECTS else "9:16"
+    # Ratio is intentionally fixed: always render a 9:16 vertical canvas.
+    target_aspect = ASPECTS["9:16"]
     base_rect = resolve_crop(src_w, src_h, s, auto)
     render_rect = user_crop(base_rect, s)
-    W, H = out_size(render_rect, s.height, aspect)
+    W, H = out_size(render_rect, s.height, "9:16")
     # rawvideo/yuv420p encoders require positive even dimensions. Keep the
     # invariant here even if a crop detector returns unusual dimensions.
     W = max(2, int(W) // 2 * 2)
     H = max(2, int(H) // 2 * 2)
     rect = zoom_rect(render_rect, s.zoom)
-    # Fit any source ratio inside the canvas and fill the unused area with blur.
-    blur_bg = needs_blur_bg(rect, aspect)
+    # Fit any source ratio inside 9:16 and fill the unused area with blur.
+    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.08)
     interp = cv2.INTER_AREA if H < rect[3] else cv2.INTER_LINEAR
     mirror_every = float(s.mirror_every)
     legacy_flip = bool(s.flip)
     seg_len = mirror_every if mirror_every > 0 else 0.0
     fps_out = int(s.fps)
     nfr = max(1, int(round(total * fps_out)))
-    fs = sub_font_size(W, H, s.sub_size)
+    fs = max(16, int(W * s.sub_size / 100))
     style = {"alpha": int(s.sub_alpha), "color": GOLD, "layout": "raqm",
              "box": bool(s.sub_box)}
     # Neon border intentionally disabled for output video.
@@ -2007,55 +2049,69 @@ def split_video(src, out_prefix, seg_min=1.03, progress=None):
     return outs
 
 # ---- preview
-_CROP_CACHE = {}
-
-def _detect_crop_cached(src):
-    st = os.stat(src)
-    key = (os.path.abspath(src), st.st_size, st.st_mtime_ns)
-    if key not in _CROP_CACHE:
-        _CROP_CACHE[key] = detect_crop(src)
-    return _CROP_CACHE[key]
-
-def _preview_frame_at(src, height, crop, t):
-    """Seek straight to the wanted frame in the source (preview starts at 1s)."""
-    cap = cv2.VideoCapture(src)
+def _preview_clip(src, clip_path, height, crop):
+    if os.path.exists(clip_path) and os.path.getsize(clip_path) > 1000:
+        return clip_path
+    raw = clip_path + "_raw.mp4"
+    tmp = clip_path + "_tmp.mp4"
     try:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-        start = fps if n > fps * 1.5 else 0
-        idx = max(0, min(int(round(start + float(t) * fps)), n - 1))
-        fr = None
-        # the frame count can be slightly too high, so step back near the end
-        for i in (idx, idx - int(fps), 0):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, i))
-            ok, f = cap.read()
-            if ok:
-                fr = f
+        for ss in (["-ss", "1"], []):
+            subprocess.run(["ffmpeg", "-y", *ss, "-i", src, "-t", f"{PREVIEW_SECS + 0.5:.1f}",
+                            "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+                            "-pix_fmt", "yuv420p", raw],
+                           capture_output=True, text=True)
+            if os.path.exists(raw) and os.path.getsize(raw) > 1000:
                 break
+        if not os.path.exists(raw) or os.path.getsize(raw) <= 1000:
+            raise RuntimeError("preview clip မရပါ")
+        prepare_video(raw, tmp, height, crop)
+        os.replace(tmp, clip_path)
     finally:
-        cap.release()
+        for f in (raw, tmp):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+    return clip_path
+
+def _preview_frame_at(src, cache_dir, height, crop, t):
+    key = f"pv_clip_{os.path.getsize(src)}_{int(height)}_{int(bool(crop))}.mp4"
+    clip = _preview_clip(src, os.path.join(cache_dir, key), height, crop)
+    cap = cv2.VideoCapture(clip)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    idx = max(0, min(int(round(float(t) * fps)), n - 1))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+    ok, fr = cap.read()
+    if not ok:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        fr = None
+        for _ in range(idx + 1):
+            ok2, f2 = cap.read()
+            if not ok2:
+                break
+            fr = f2
+    cap.release()
     if fr is None:
         raise RuntimeError("preview frame မရပါ")
-    src_h, src_w = fr.shape[:2]
-    auto = _detect_crop_cached(src) if crop else None
-    x, y, w, h = resolve_crop(src_w, src_h, Settings(crop=bool(crop)), auto)
-    fr = fr[y:y + h, x:x + w]
-    th = int(height) // 2 * 2
-    tw = max(2, int(round(fr.shape[1] * th / fr.shape[0] / 2)) * 2)
-    return cv2.resize(fr, (tw, th), interpolation=cv2.INTER_AREA)
+    return fr
 
 def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0,
                        show_part_label=True):
+    cache_dir = os.path.dirname(os.path.abspath(out_png))
     t = max(0.0, min(float(t), PREVIEW_SECS))
-    base = _preview_frame_at(src, s.height or 720, s.crop, t)
+    base = _preview_frame_at(src, cache_dir, s.height or 720, s.crop, t)
     src_h, src_w = base.shape[:2]
     mirror = s.mirror_phase(t)
     rect = user_crop((0, 0, src_w, src_h), s)
-    aspect = s.aspect if s.aspect in ASPECTS else "9:16"
-    W, H = out_size(rect, s.height, aspect)
-    # Same layout as the final render: zoom the source, then fit it over blur.
-    rect = zoom_rect(rect, s.zoom)
-    fr = apply_view(base, rect, W, H, mirror, blur_bg=needs_blur_bg(rect, aspect))
+    target_aspect = ASPECTS["9:16"]
+    W, H = out_size(rect, s.height, "9:16")
+    # Preview should use the same 9:16 fit layout as the final render:
+    # keep the source fully visible and fill the upper/lower empty area with blur.
+    blur_bg = bool(abs((rect[2] / max(1, rect[3])) / target_aspect - 1.0) > 0.02)
+    fr = apply_view(base, rect, W, H, mirror, blur_bg=blur_bg)
+    fr = zoom_flip(fr, s.zoom, False)
     # Preview marker: match the final Part-N label style exactly:
     # gold text with a black outline, centered in the upper blur area.
     label = "Part-1" if show_part_label else ""
@@ -2075,7 +2131,7 @@ def make_preview_frame(src, out_png, s, text, font_path, is_mm=True, t=0.0,
     if font_path and s.sub:
         preview_text = text or "စာတန်းထိုး နမူနာ စာသား ဖြစ်ပါတယ်။"
         ov = build_overlay(preview_text, W, H, font_path,
-                           sub_font_size(W, H, s.sub_size),
+                           max(16, int(W * s.sub_size / 100)),
                            s.sub_pos, alpha=int(s.sub_alpha), color=GOLD,
                            is_mm=is_mm, box=bool(s.sub_box))
         if ov:
@@ -2148,19 +2204,15 @@ class Project:
 # ======================================================================
 # pipeline
 # ======================================================================
-_IMPORT_LOCKS = {}
-
 def init_project(path, source, height=0, cookies_file=None, progress=None):
-    # Upload auto-fetch and a button press can overlap; never prepare the same file twice.
-    with _IMPORT_LOCKS.setdefault(os.path.abspath(path), threading.Lock()):
-        proj = Project.create(path)
-        if os.path.exists(proj.video) and proj.data.get("source") == source:
-            log("• video ရှိပြီးသား၊ ပြန်မဆွဲတော့ဘူး")
-        else:
-            fetch_video(source, proj.video, height, progress, cookies_file)
-        proj.data["source"] = source
-        proj.save()
-        return proj
+    proj = Project.create(path)
+    if os.path.exists(proj.video) and proj.data.get("source") == source:
+        log("• video ရှိပြီးသား၊ ပြန်မဆွဲတော့ဘူး")
+    else:
+        fetch_video(source, proj.video, height, progress, cookies_file)
+    proj.data["source"] = source
+    proj.save()
+    return proj
 
 def run_transcribe(proj, model="base", src_lang="auto", fast=True, max_min=0, lang="my",
                    progress=None):
@@ -2394,7 +2446,7 @@ def render_subtitles_original(proj, s, texts, progress=None):
             if seg_i < len(subtitle_segments):
                 seg_start, seg_end, text = subtitle_segments[seg_i]
                 if seg_start <= t < seg_end and text.strip():
-                    fs = sub_font_size(W, H, s.sub_size)
+                    fs = max(16, int(W * s.sub_size / 100))
                     ov = build_overlay(text, W, H, font, fs, s.sub_pos,
                                        alpha=int(s.sub_alpha), color=GOLD,
                                        is_mm=LANG_CONF[s.lang]["is_mm"],
@@ -3123,7 +3175,7 @@ def launch_ui():
         # stayed visible even though the project state had been deleted.
         return ("", "", "", "", [], {}, "", None, None, None, "🗑️ ရှင်းပြီး",
                 "", "", gr.Timer(active=False), gr.Timer(active=False),
-                gr.update(interactive=True), "", None)
+                gr.update(interactive=True), "")
 
     def make_setter(lo, hi):
         def f(text, parts):
@@ -3182,8 +3234,7 @@ def launch_ui():
                            label="Video Quality (မူရင်း HD = resolution မကန့်သတ်)")
         mode = gr.Radio(["Recap", "မြန်မာစာတန်းသီးသန့်"], value="Recap",
                         label="Output Mode (Default: Recap)")
-        aspect = gr.Radio([("9:16 (TikTok / Shorts)", "9:16"), ("16:9 (YouTube)", "16:9")],
-                          value="9:16", label="Video Ratio (Recap mode)")
+        aspect = gr.State("9:16")
         fps = gr.State(24)
         preset = gr.State("ultrafast")
         crop = gr.State(True)
@@ -3211,10 +3262,9 @@ def launch_ui():
         gr.Markdown("### 📥 Video")
         url = gr.Textbox(label="Video link (YouTube / TikTok / Rednote) — paste ပြီး Enter",
                          placeholder="https://...")
-        # gr.File: no browser playback and no server-side MP4 conversion on upload.
-        video_upload = gr.File(label="ဒါမှမဟုတ် Video ဖိုင် Upload လုပ်ပါ",
-                               file_types=["video", ".mp4", ".mov", ".mkv", ".webm", ".avi"],
-                               type="filepath")
+        video_upload = gr.Video(label="ဒါမှမဟုတ် Video ဖိုင် Upload လုပ်ပါ",
+                                sources=["upload"],
+                                format="mp4")
         b_fetch = gr.Button("⬇️ Video ဆွဲ / Upload + Preview")
         status_fetch = gr.Markdown()
 
@@ -3249,13 +3299,13 @@ def launch_ui():
         fetch_job = gr.State("")
         fetch_timer = gr.Timer(1.0, active=False)
         quality.change(lambda q: _quality_height(q), quality, height)
-        for trig in (url.submit, b_fetch.click, video_upload.upload):
+        for trig in (url.submit, b_fetch.click, video_upload.change):
             trig(start_fetch, [url, video_upload, quality],
                  [fetch_job, status_fetch, fetch_timer])
         fetch_timer.tick(poll_fetch, [fetch_job] + pv_in[1:],
                          [pdir_state, status_fetch, pv_img, fetch_timer],
                          show_progress="hidden")
-        for c in (aspect, sub_size, sub_pos, zoom, sub, sweep, flip, lang,
+        for c in (sub_size, sub_pos, zoom, sub, sweep, flip, lang,
                   crop_l, crop_r, crop_t, crop_b, pv_t):
             c.change(preview_auto, pv_in, pv_img,
                      trigger_mode="always_last", show_progress="hidden", queue=True)
@@ -3320,12 +3370,11 @@ def launch_ui():
         b3.click(reset_all, pdir_state,
                  [url, pdir_state, status_fetch, status1, chunks_state, parts_state, translated,
                   pv_img, video, dl, status2, fetch_job, trans_job, fetch_timer, trans_timer, b1,
-                  hashtag_output, video_upload])
+                  hashtag_output])
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
-    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True,
-                        share=bool(os.environ.get("GRADIO_SHARE")), **lk)
+    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True, **lk)
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
