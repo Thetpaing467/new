@@ -2401,103 +2401,148 @@ def _build_subs(my_list, durs, lang):
     return subs
 
 def render_subtitles_original(proj, s, texts, progress=None, audio_path=None):
-    """Burn translated subtitles onto the original video and optionally use a supplied audio track."""
+    """Burn translated subtitles onto the original video using cached overlays and parallel chunks."""
+    import bisect
     progress = progress or Progress()
     src = proj.video
-    out = os.path.join(proj.path, "subtitle_voice.mp4" if audio_path
-                       else "subtitle_only.mp4")
-    silent = os.path.join(proj.path, "subtitle_only_video.mp4")
+    out = os.path.join(proj.path, "subtitle_voice.mp4" if audio_path else "subtitle_only.mp4")
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
         raise RuntimeError("မူရင်း video ကို ဖွင့်မရပါ")
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) // 2 * 2
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) // 2 * 2
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    total_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1)
+    cap.release()
     font = find_font(s.lang, s.font)
     if not font:
-        cap.release()
         raise RuntimeError("မြန်မာစာတန်းအတွက် font မတွေ့ပါ")
-    # Split long translated lines into short readable subtitle segments while
-    # preserving each source line's original time range.
-    subtitle_segments = []
+
+    segs = []
     for u, text in zip(proj.units, texts):
         pieces = split_for_sub(text, mc=26, lang=s.lang) or [text]
-        total_chars = sum(len(x) for x in pieces) or 1
+        total = sum(len(x) for x in pieces) or 1
         cur = float(u["start"])
-        duration = max(0.05, float(u["end"]) - cur)
-        for j, piece in enumerate(pieces):
-            seg_dur = duration * len(piece) / total_chars
-            subtitle_segments.append((cur, cur + seg_dur, piece))
-            cur += seg_dur
-    seg_i = 0
+        dur = max(0.05, float(u["end"]) - cur)
+        for piece in pieces:
+            part_dur = dur * len(piece) / total
+            segs.append((cur, cur + part_dur, piece))
+            cur += part_dur
+    segs.sort(key=lambda x: x[0])
+    starts = [x[0] for x in segs]
+    fs = max(16, int(W * s.sub_size / 100))
+    is_mm = LANG_CONF[s.lang]["is_mm"]
+
+    cpu = os.cpu_count() or 2
     try:
-        proc = subprocess.Popen(
-            ["ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
-             "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", f"{fps:.6f}",
-             "-i", "-", "-an", "-c:v", "libx264", "-preset", "veryfast",
-             "-crf", "18", "-pix_fmt", "yuv420p", silent],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        idx = 0
-        unit_i = 0
-        while True:
-            ok, fr = cap.read()
-            if not ok:
-                break
-            t = idx / fps
-            while unit_i + 1 < len(proj.units) and t >= float(proj.units[unit_i]["end"]):
-                unit_i += 1
-            while seg_i + 1 < len(subtitle_segments) and t >= subtitle_segments[seg_i][1]:
-                seg_i += 1
-            if seg_i < len(subtitle_segments):
-                seg_start, seg_end, text = subtitle_segments[seg_i]
-                if seg_start <= t < seg_end and text.strip():
-                    fs = max(16, int(W * s.sub_size / 100))
-                    ov = build_overlay(text, W, H, font, fs, s.sub_pos,
-                                       alpha=int(s.sub_alpha), color=GOLD,
-                                       is_mm=LANG_CONF[s.lang]["is_mm"],
-                                       box=bool(s.sub_box))
-                    if ov:
-                        blend_overlay(fr, ov, None)
-            proc.stdin.write(fr.tobytes())
-            idx += 1
-            if idx % 10 == 0:
-                progress(min(idx / max(1, total_frames), 0.95),
-                         f"မြန်မာစာတန်းထိုးနေတယ် {idx}/{total_frames}")
-        proc.stdin.close()
-        err = proc.stderr.read().decode("utf-8", "replace")[-1200:]
-        rc = proc.wait()
-        if rc != 0:
-            raise RuntimeError("Subtitle video render မအောင်မြင်ပါ\n" + err)
+        requested_workers = int(os.environ.get("SUB_WORKERS", min(cpu, 4)))
+    except ValueError:
+        requested_workers = min(cpu, 4)
+    nw = max(1, min(requested_workers, total_frames // 150 or 1))
+    edges = [int(round(total_frames * i / nw)) for i in range(nw + 1)]
+    per_threads = max(1, cpu // nw)
+    tag = uuid.uuid4().hex[:6]
+    parts = [os.path.join(proj.path, f"_sub{tag}_{i:03d}.mp4") for i in range(nw)]
+    counts = [0] * nw
+    abort = threading.Event()
+
+    def worker(pi):
+        j0, j1 = edges[pi], edges[pi + 1]
+        c = cv2.VideoCapture(src)
+        if not c.isOpened():
+            raise RuntimeError(f"source video မဖွင့်နိုင်ပါ (chunk {pi})")
+        if j0 > 0:
+            c.set(cv2.CAP_PROP_POS_FRAMES, j0)
+        log_path = parts[pi] + ".log"
+        log_fh = open(log_path, "wb")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
+               "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", f"{fps:.6f}",
+               "-i", "-", "-an", "-c:v", "libx264", "-preset", "ultrafast",
+               "-crf", "20", "-pix_fmt", "yuv420p", "-threads", str(per_threads),
+               parts[pi]]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                stderr=log_fh)
+        last, current_k, overlay = None, -1, None
+        try:
+            for j in range(j0, j1):
+                if abort.is_set():
+                    return
+                ok, frame = c.read()
+                if not ok:
+                    if last is None:
+                        raise RuntimeError(f"frame မဖတ်နိုင်ပါ (chunk {pi})")
+                    frame = last
+                elif frame.shape[0] != H or frame.shape[1] != W:
+                    frame = np.ascontiguousarray(frame[:H, :W])
+                t = j / fps
+                k = bisect.bisect_right(starts, t) - 1
+                if k >= 0 and t < segs[k][1] and segs[k][2].strip():
+                    if k != current_k:
+                        overlay = build_overlay(segs[k][2], W, H, font, fs, s.sub_pos,
+                                                alpha=int(s.sub_alpha), color=GOLD,
+                                                is_mm=is_mm, box=bool(s.sub_box))
+                        current_k = k
+                    if overlay:
+                        blend_overlay(frame, overlay, None)
+                proc.stdin.write(frame.data)
+                last = frame
+                counts[pi] += 1
+        except BrokenPipeError:
+            pass
+        except BaseException:
+            abort.set()
+            raise
+        finally:
+            c.release()
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+            proc.wait()
+            log_fh.close()
+        if proc.returncode != 0:
+            with open(log_path, "rb") as fh:
+                tail = fh.read()[-1200:].decode("utf-8", "ignore")
+            abort.set()
+            raise RuntimeError(f"subtitle chunk {pi} fail\n{tail}")
+
+    list_path = os.path.join(proj.path, f"_subparts{tag}.txt")
+    try:
+        with ThreadPoolExecutor(max_workers=nw) as pool:
+            futures = [pool.submit(worker, i) for i in range(nw)]
+            while not all(f.done() for f in futures):
+                time.sleep(0.25)
+                progress(min(sum(counts) / total_frames, 0.95) * 0.95,
+                         f"မြန်မာစာတန်းထိုးနေတယ် {sum(counts)}/{total_frames}")
+            for future in futures:
+                future.result()
+        progress(0.96, "Video + အသံ ပေါင်းနေတယ်")
+        with open(list_path, "w", encoding="utf-8") as fh:
+            for part in parts:
+                fh.write(f"file '{part}'\n")
+        if audio_path and os.path.isfile(audio_path):
+            cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                   "-i", list_path, "-i", audio_path, "-map", "0:v:0", "-map", "1:a:0",
+                   "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                   "-ac", "2", "-t", f"{proj.data['vdur']:.3f}", "-movflags", "+faststart", out]
+        else:
+            cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                   "-i", list_path, "-i", src, "-map", "0:v:0", "-map", "1:a:0?",
+                   "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest",
+                   "-movflags", "+faststart", out]
+        sh(cmd)
     finally:
-        cap.release()
-    # Subtitle-only keeps the source audio. The subtitle+voice mode supplies
-    # a generated Burmese track instead, while preserving the original video.
-    if audio_path and os.path.isfile(audio_path):
-        sh(["ffmpeg", "-y", "-i", silent, "-i", audio_path,
-            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
-            "-b:a", "192k", "-ar", "44100", "-ac", "2", "-t",
-            f"{proj.data['vdur']:.3f}", "-movflags", "+faststart", out])
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=codec_name", "-of", "default=nw=1",
-             out], capture_output=True, text=True)
-        if probe.returncode != 0 or not probe.stdout.strip():
-            raise RuntimeError("မြန်မာအသံကို video ထဲ မပေါင်းနိုင်ပါ — audio stream မတွေ့ပါ")
-    else:
-        sh(["ffmpeg", "-y", "-i", silent, "-i", src,
-            "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
-            "-shortest", "-movflags", "+faststart", out])
-    try:
-        os.remove(silent)
-    except OSError:
-        pass
+        for path in parts + [list_path]:
+            for target in (path, path + ".log"):
+                if os.path.exists(target):
+                    try:
+                        os.remove(target)
+                    except OSError:
+                        pass
     progress(1.0, "မြန်မာစာတန်းပြီးပြီ" if not audio_path else "မြန်မာစာတန်း + အသံပြီးပြီ")
-    return {"final": out, "new_dur": proj.data["vdur"],
-            "old_dur": proj.data["vdur"],
+    return {"final": out, "new_dur": proj.data["vdur"], "old_dur": proj.data["vdur"],
             "timings": {"subtitle_only": not bool(audio_path),
                         "subtitle_voice": bool(audio_path)}}
-
 
 def render_subtitles_voice_original(proj, s, texts, proxy=None, progress=None):
     """Keep original visuals, burn Burmese subtitles, and replace audio with timed TTS."""
