@@ -2400,8 +2400,8 @@ def _build_subs(my_list, durs, lang):
         t0 += durs[i]
     return subs
 
-def render_subtitles_original(proj, s, texts, progress=None):
-    """Burn translated subtitles onto the original video size and keep source audio."""
+def render_subtitles_original(proj, s, texts, progress=None, audio_path=None):
+    """Burn translated subtitles onto the original video and optionally use a supplied audio track."""
     progress = progress or Progress()
     src = proj.video
     out = os.path.join(proj.path, "subtitle_only.mp4")
@@ -2470,17 +2470,65 @@ def render_subtitles_original(proj, s, texts, progress=None):
             raise RuntimeError("Subtitle video render မအောင်မြင်ပါ\n" + err)
     finally:
         cap.release()
-    # Reattach the original audio without changing its codec or volume.
-    sh(["ffmpeg", "-y", "-i", silent, "-i", src,
-        "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
-        "-shortest", "-movflags", "+faststart", out])
+    # Subtitle-only keeps the source audio. The subtitle+voice mode supplies
+    # a generated Burmese track instead, while preserving the original video.
+    if audio_path and os.path.isfile(audio_path):
+        sh(["ffmpeg", "-y", "-i", silent, "-i", audio_path,
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
+            "-b:a", "192k", "-shortest", "-movflags", "+faststart", out])
+    else:
+        sh(["ffmpeg", "-y", "-i", silent, "-i", src,
+            "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
+            "-shortest", "-movflags", "+faststart", out])
     try:
         os.remove(silent)
     except OSError:
         pass
-    progress(1.0, "မြန်မာစာတန်းပြီးပြီ")
+    progress(1.0, "မြန်မာစာတန်းပြီးပြီ" if not audio_path else "မြန်မာစာတန်း + အသံပြီးပြီ")
     return {"final": out, "new_dur": proj.data["vdur"],
-            "old_dur": proj.data["vdur"], "timings": {"subtitle_only": True}}
+            "old_dur": proj.data["vdur"],
+            "timings": {"subtitle_only": not bool(audio_path),
+                        "subtitle_voice": bool(audio_path)}}
+
+
+def render_subtitles_voice_original(proj, s, texts, proxy=None, progress=None):
+    """Keep original visuals, burn Burmese subtitles, and replace audio with timed TTS."""
+    progress = progress or Progress()
+    my_list = [clean_text(t, "my") for t in texts]
+    if not my_list or any(not t.strip() for t in my_list):
+        raise RuntimeError("မြန်မာစာသား မပြည့်သေးပါ")
+    old_lang = s.lang
+    s.lang = "my"
+    # Generate each line with the selected Edge/Nara Burmese voice.
+    _synthesize(proj, my_list, s, progress.sub(0.0, 0.55), proxy)
+    vdur = float(proj.data["vdur"])
+    inputs = []
+    filters = []
+    for i, u in enumerate(proj.units):
+        wav = os.path.join(proj.path, f"a{i:04d}.wav")
+        if not os.path.isfile(wav):
+            continue
+        inputs += ["-i", wav]
+        delay = max(0, int(float(u["start"]) * 1000))
+        idx = len(filters)
+        filters.append(f"[{idx}:a]adelay={delay}:all=1[a{idx}]")
+    if not inputs:
+        s.lang = old_lang
+        raise RuntimeError("TTS audio မထွက်ပါ")
+    n_audio = len(filters)
+    labels = "".join(f"[a{i}]" for i in range(n_audio))
+    filters.append(f"{labels}amix=inputs={n_audio}:duration=longest:dropout_transition=0,"
+                   f"atrim=duration={vdur:.3f},apad[aout]")
+    voice_audio = os.path.join(proj.path, "burmese_voice_original.wav")
+    sh(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters),
+        "-map", "[aout]", "-t", f"{vdur:.3f}", "-ar", "44100", "-ac", "2",
+        "-c:a", "pcm_s16le", voice_audio])
+    progress(0.58, "မြန်မာအသံနဲ့ စာတန်းပေါင်းနေတယ်...")
+    result = render_subtitles_original(proj, s, my_list,
+                                       progress=progress.sub(0.58, 1.0),
+                                       audio_path=voice_audio)
+    s.lang = old_lang
+    return result
 
 def run_render(proj, s, proxy=None, progress=None):
     progress = progress or Progress()
@@ -3013,7 +3061,8 @@ def launch_ui():
         source = _source(_path(upload) or url)
         if not source:
             raise gr.Error("Video link ထည့်ပါ၊ ဒါမှမဟုတ် Video ဖိုင် Upload လုပ်ပါ")
-        code = "my" if mode == "မြန်မာစာတန်းသီးသန့်" else LANGS[lang_name]
+        subtitle_mode = mode in ("မြန်မာစာတန်းသီးသန့်", "မြန်မာစာတန်းထိုး + အသံ")
+        code = "my" if subtitle_mode else LANGS[lang_name]
         jid = uuid.uuid4().hex[:8]
         st = {"f": 0.0, "label": "စတင်နေတယ်...", "res": None, "err": None,
               "done": False, "t0": time.time()}
@@ -3032,7 +3081,7 @@ def launch_ui():
                 tr = Progress(0.2, 1.0, parent=lambda f, l=None: cb(f, l))
                 info = run_transcribe(proj, model, src_lang, True, int(max_min), code, tr)
                 chunks = (build_subtitle_prompt_chunks(proj.units)
-                          if mode == "မြန်မာစာတန်းသီးသန့်"
+                          if subtitle_mode
                           else build_prompt_chunks(proj.units, code))
                 st["res"] = (pdir, info, chunks)
             except BaseException as ex:
@@ -3072,7 +3121,8 @@ def launch_ui():
               progress=gr.Progress()):
         if not pdir or not os.path.isdir(pdir):
             raise gr.Error("အဆင့် 1 ကို အရင်လုပ်ပါ")
-        code = "my" if mode == "မြန်မာစာတန်းသီးသန့်" else LANGS[lang_name]
+        subtitle_mode = mode in ("မြန်မာစာတန်းသီးသန့်", "မြန်မာစာတန်းထိုး + အသံ")
+        code = "my" if subtitle_mode else LANGS[lang_name]
         try:
             proj = Project.load(pdir)
             if not proj.units:
@@ -3125,6 +3175,20 @@ def launch_ui():
                 s.flip = False
                 s.zoom = 1.0
                 res = render_subtitles_original(proj, s, [u["my"] for u in proj.units], prog)
+                files = [res["final"]]
+                out = res["final"]
+                split_note = ""
+            elif mode == "မြန်မာစာတန်းထိုး + အသံ":
+                # Preserve original visuals, burn the same Burmese subtitles,
+                # and use timed Burmese TTS as the output audio track.
+                s.lang = "my"
+                s.sub = True
+                s.crop = False
+                s.flip = False
+                s.zoom = 1.0
+                res = render_subtitles_voice_original(
+                    proj, s, [u["my"] for u in proj.units],
+                    os.environ.get("EDGE_TTS_PROXY") or None, prog)
                 files = [res["final"]]
                 out = res["final"]
                 split_note = ""
@@ -3237,7 +3301,7 @@ def launch_ui():
         height = gr.State(720)
         quality = gr.Radio(["720p", "1080p", "မူရင်း HD"], value="720p",
                            label="Video Quality (မူရင်း HD = resolution မကန့်သတ်)")
-        mode = gr.Radio(["Recap", "မြန်မာစာတန်းသီးသန့်"], value="Recap",
+        mode = gr.Radio(["Recap", "မြန်မာစာတန်းသီးသန့်", "မြန်မာစာတန်းထိုး + အသံ"], value="Recap",
                         label="Output Mode (Default: Recap)")
         aspect = gr.State("9:16")
         fps = gr.State(24)
