@@ -9,13 +9,18 @@ Usage: python recap.py run <video|url> -d work/ep1 --lang my
        python recap.py run <video|url> -d work/ep1 --lang es
        python recap.py ui            (Gradio web UI, dark mode)
 """
-import spaces
-
+try:
+    import spaces
+except ImportError:
+    class _SpacesFallback:
+        @staticmethod
+        def GPU(func):
+            return func
+    spaces = _SpacesFallback()
 
 @spaces.GPU
 def _gpu_placeholder():
     return 0
-
 
 __version__ = "1.27.4"
 
@@ -3374,7 +3379,7 @@ def launch_ui():
 
     ok = set(inspect.signature(demo.launch).parameters)
     lk = {k: v for k, v in launch_kw.items() if k in ok}
-    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, show_error=True, **lk)
+    demo.queue().launch(server_name="0.0.0.0", server_port=PORT, share=True, show_error=True, **lk)
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
