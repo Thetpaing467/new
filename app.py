@@ -2404,7 +2404,8 @@ def render_subtitles_original(proj, s, texts, progress=None, audio_path=None):
     """Burn translated subtitles onto the original video and optionally use a supplied audio track."""
     progress = progress or Progress()
     src = proj.video
-    out = os.path.join(proj.path, "subtitle_only.mp4")
+    out = os.path.join(proj.path, "subtitle_voice.mp4" if audio_path
+                       else "subtitle_only.mp4")
     silent = os.path.join(proj.path, "subtitle_only_video.mp4")
     cap = cv2.VideoCapture(src)
     if not cap.isOpened():
@@ -2475,7 +2476,14 @@ def render_subtitles_original(proj, s, texts, progress=None, audio_path=None):
     if audio_path and os.path.isfile(audio_path):
         sh(["ffmpeg", "-y", "-i", silent, "-i", audio_path,
             "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
-            "-b:a", "192k", "-shortest", "-movflags", "+faststart", out])
+            "-b:a", "192k", "-ar", "44100", "-ac", "2", "-t",
+            f"{proj.data['vdur']:.3f}", "-movflags", "+faststart", out])
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name", "-of", "default=nw=1",
+             out], capture_output=True, text=True)
+        if probe.returncode != 0 or not probe.stdout.strip():
+            raise RuntimeError("မြန်မာအသံကို video ထဲ မပေါင်းနိုင်ပါ — audio stream မတွေ့ပါ")
     else:
         sh(["ffmpeg", "-y", "-i", silent, "-i", src,
             "-map", "0:v:0", "-map", "1:a:0?", "-c:v", "copy", "-c:a", "copy",
@@ -2502,26 +2510,36 @@ def render_subtitles_voice_original(proj, s, texts, proxy=None, progress=None):
     # Generate each line with the selected Edge/Nara Burmese voice.
     _synthesize(proj, my_list, s, progress.sub(0.0, 0.55), proxy)
     vdur = float(proj.data["vdur"])
-    inputs = []
-    filters = []
+    sr = 44100
+    cursor = 0
+    placed = []
     for i, u in enumerate(proj.units):
         wav = os.path.join(proj.path, f"a{i:04d}.wav")
         if not os.path.isfile(wav):
             continue
-        inputs += ["-i", wav]
-        delay = max(0, int(float(u["start"]) * 1000))
-        idx = len(filters)
-        filters.append(f"[{idx}:a]adelay={delay}:all=1[a{idx}]")
-    if not inputs:
+        with wave.open(wav) as wf:
+            data = np.frombuffer(wf.readframes(wf.getnframes()),
+                                 dtype=np.int16).astype(np.float32) / 32768.0
+        if data.size == 0:
+            continue
+        pos = max(int(float(u["start"]) * sr), cursor)
+        placed.append((pos, data))
+        cursor = pos + data.size
+    if not placed:
         s.lang = old_lang
         raise RuntimeError("TTS audio မထွက်ပါ")
-    n_audio = len(filters)
-    labels = "".join(f"[a{i}]" for i in range(n_audio))
-    filters.append(f"{labels}amix=inputs={n_audio}:duration=longest:dropout_transition=0,"
-                   f"atrim=duration={vdur:.3f},apad[aout]")
+    buf = np.zeros(max(int(vdur * sr), cursor) + sr, dtype=np.float32)
+    for pos, data in placed:
+        buf[pos:pos + data.size] = data
+    raw_mix = os.path.join(proj.path, "burmese_voice_raw.wav")
+    with wave.open(raw_mix, "wb") as out_wf:
+        out_wf.setparams((1, 2, sr, 0, "NONE", "not compressed"))
+        out_wf.writeframes((np.clip(buf, -1, 1) * 32767).astype(np.int16).tobytes())
     voice_audio = os.path.join(proj.path, "burmese_voice_original.wav")
-    sh(["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filters),
-        "-map", "[aout]", "-t", f"{vdur:.3f}", "-ar", "44100", "-ac", "2",
+    sh(["ffmpeg", "-y", "-i", raw_mix,
+        "-af", f"loudnorm=I={s.loud_lufs:g}:TP=-1.5:LRA=11,"
+               f"volume={s.voice_db:g}dB,alimiter=limit=0.97,apad",
+        "-t", f"{vdur:.3f}", "-ar", "44100", "-ac", "2",
         "-c:a", "pcm_s16le", voice_audio])
     progress(0.58, "မြန်မာအသံနဲ့ စာတန်းပေါင်းနေတယ်...")
     result = render_subtitles_original(proj, s, my_list,
